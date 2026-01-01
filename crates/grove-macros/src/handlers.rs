@@ -2,18 +2,32 @@
 //!
 //! This macro is placed on an impl block and:
 //! - Finds methods marked with `#[grove(command)]` - generates command handling
+//! - Finds methods marked with `#[grove(command, poll)]` - commands that queue for poll()
+//! - Finds methods marked with `#[grove(direct)]` - exposed on handle for direct calls
 //! - Finds methods marked with `#[grove(from = field)]` - generates event subscriptions
 //! - Generates spawn() method with select! for commands and events
 
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
-use syn::{parse2, Error, FnArg, Ident, ImplItem, ImplItemFn, ItemImpl, Pat, Result, Type};
+use syn::{
+    parse::Parser, parse2, Error, FnArg, Ident, ImplItem, ImplItemFn, ItemImpl, Pat, Result, Type,
+};
 
 /// A parsed command method.
 struct CommandMethod {
     method_name: Ident,
     variant_name: Ident,
-    param: Option<(Ident, Type)>,
+    /// Parameters for the command (excludes poll args if queues_for_poll)
+    params: Vec<(Ident, Type)>,
+    /// If true, this command queues work for poll() instead of running directly
+    queues_for_poll: bool,
+}
+
+/// A parsed direct method - exposed on handle for direct calls.
+struct DirectMethod {
+    method_name: Ident,
+    /// All parameters including poll args
+    params: Vec<(Ident, Type)>,
 }
 
 /// A parsed event handler method.
@@ -24,6 +38,12 @@ struct EventHandler {
     source_field: Ident,
     /// The event type (extracted from method parameter)
     event_type: Type,
+}
+
+/// A parsed background task method.
+struct TaskMethod {
+    /// The method name
+    method_name: Ident,
 }
 
 /// Main entry point for the handlers attribute macro.
@@ -47,18 +67,56 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
     let command_enum_name = format_ident!("{}Command", struct_name);
     let handle_name = format_ident!("{}Handle", struct_name);
 
+    // Parse impl-level attributes for poll signature
+    let poll_signature = parse_poll_from_impl(&impl_block)?;
+    let poll_arg_count = poll_signature.as_ref().map(|v| v.len()).unwrap_or(0);
+
     // Parse all methods
     let mut command_methods: Vec<CommandMethod> = Vec::new();
+    let mut direct_methods: Vec<DirectMethod> = Vec::new();
     let mut event_handlers: Vec<EventHandler> = Vec::new();
+    let mut task_methods: Vec<TaskMethod> = Vec::new();
     let mut clean_items: Vec<ImplItem> = Vec::new();
 
     for item in impl_block.items.iter() {
         if let ImplItem::Fn(method) = item {
-            if let Some(cmd) = parse_command_method(method)? {
-                command_methods.push(cmd);
+            let attrs = parse_method_attrs(method)?;
+
+            if attrs.is_command {
+                let all_params = extract_all_params(&method.sig.inputs)?;
+                // If poll flag is set, skip poll args from command params
+                let params = if attrs.is_poll {
+                    all_params.into_iter().skip(poll_arg_count).collect()
+                } else {
+                    all_params
+                };
+
+                command_methods.push(CommandMethod {
+                    method_name: method.sig.ident.clone(),
+                    variant_name: format_ident!("{}", to_pascal_case(&method.sig.ident.to_string())),
+                    params,
+                    queues_for_poll: attrs.is_poll,
+                });
                 clean_items.push(ImplItem::Fn(strip_grove_attrs(method.clone())));
-            } else if let Some(handler) = parse_event_handler(method)? {
-                event_handlers.push(handler);
+            } else if attrs.is_direct {
+                direct_methods.push(DirectMethod {
+                    method_name: method.sig.ident.clone(),
+                    params: extract_all_params(&method.sig.inputs)?,
+                });
+                clean_items.push(ImplItem::Fn(strip_grove_attrs(method.clone())));
+            } else if let Some(source_field) = attrs.from_field {
+                let (_, event_type) = extract_param(&method.sig.inputs)?
+                    .ok_or_else(|| Error::new_spanned(method, "event handler must have an event parameter"))?;
+                event_handlers.push(EventHandler {
+                    method_name: method.sig.ident.clone(),
+                    source_field,
+                    event_type,
+                });
+                clean_items.push(ImplItem::Fn(strip_grove_attrs(method.clone())));
+            } else if attrs.is_task {
+                task_methods.push(TaskMethod {
+                    method_name: method.sig.ident.clone(),
+                });
                 clean_items.push(ImplItem::Fn(strip_grove_attrs(method.clone())));
             } else {
                 clean_items.push(item.clone());
@@ -68,9 +126,14 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
         }
     }
 
-    // Generate command infrastructure (always generate enum, even if empty)
-    let (command_enum, execute_impl, handle_sender_impl) =
-        generate_command_infra(&struct_name, &command_enum_name, &handle_name, &command_methods);
+    // Generate command infrastructure
+    let (command_enum, execute_impl, handle_sender_impl, service_queue_impl) = generate_command_infra(
+        &struct_name,
+        &command_enum_name,
+        &handle_name,
+        &command_methods,
+        poll_signature.as_ref(),
+    );
 
     // Generate spawn implementation
     let spawn_impl = generate_spawn_impl(
@@ -79,7 +142,11 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
         &command_enum_name,
         &command_methods,
         &event_handlers,
+        &task_methods,
     );
+
+    // Generate direct method wrappers on handle
+    let direct_impl = generate_direct_methods(&struct_name, &handle_name, &direct_methods);
 
     // Reconstruct the impl block
     let impl_generics = &impl_block.generics;
@@ -97,6 +164,8 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
         #clean_impl
         #handle_sender_impl
         #spawn_impl
+        #service_queue_impl
+        #direct_impl
     })
 }
 
@@ -104,38 +173,23 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
 // Parsing
 // ============================================================================
 
-fn parse_command_method(method: &ImplItemFn) -> Result<Option<CommandMethod>> {
-    let has_command_attr = method.attrs.iter().any(|attr| {
-        if !attr.path().is_ident("grove") {
-            return false;
-        }
-        let mut is_command = false;
-        let _ = attr.parse_nested_meta(|meta| {
-            if meta.path.is_ident("command") {
-                is_command = true;
-            }
-            Ok(())
-        });
-        is_command
-    });
-
-    if !has_command_attr {
-        return Ok(None);
-    }
-
-    let method_name = method.sig.ident.clone();
-    let variant_name = format_ident!("{}", to_pascal_case(&method_name.to_string()));
-    let param = extract_param(&method.sig.inputs)?;
-
-    Ok(Some(CommandMethod {
-        method_name,
-        variant_name,
-        param,
-    }))
+/// Parsed grove attributes from a method.
+struct MethodAttrs {
+    is_command: bool,
+    is_poll: bool,
+    is_direct: bool,
+    is_task: bool,
+    from_field: Option<Ident>,
 }
 
-fn parse_event_handler(method: &ImplItemFn) -> Result<Option<EventHandler>> {
-    let mut source_field: Option<Ident> = None;
+fn parse_method_attrs(method: &ImplItemFn) -> Result<MethodAttrs> {
+    let mut attrs = MethodAttrs {
+        is_command: false,
+        is_poll: false,
+        is_direct: false,
+        is_task: false,
+        from_field: None,
+    };
 
     for attr in &method.attrs {
         if !attr.path().is_ident("grove") {
@@ -143,29 +197,51 @@ fn parse_event_handler(method: &ImplItemFn) -> Result<Option<EventHandler>> {
         }
 
         attr.parse_nested_meta(|meta| {
-            if meta.path.is_ident("from") {
+            if meta.path.is_ident("command") {
+                attrs.is_command = true;
+            } else if meta.path.is_ident("poll") {
+                attrs.is_poll = true;
+            } else if meta.path.is_ident("direct") {
+                attrs.is_direct = true;
+            } else if meta.path.is_ident("task") {
+                attrs.is_task = true;
+            } else if meta.path.is_ident("from") {
                 meta.input.parse::<syn::Token![=]>()?;
                 let field: Ident = meta.input.parse()?;
-                source_field = Some(field);
+                attrs.from_field = Some(field);
             }
             Ok(())
         })?;
     }
 
-    let source_field = match source_field {
-        Some(f) => f,
-        None => return Ok(None),
-    };
+    Ok(attrs)
+}
 
-    // Extract event type from method parameter
-    let (_, event_type) = extract_param(&method.sig.inputs)?
-        .ok_or_else(|| Error::new_spanned(method, "event handler must have an event parameter"))?;
+/// Parse #[grove(poll(&mut T1, &mut T2))] from impl block attributes.
+fn parse_poll_from_impl(impl_block: &ItemImpl) -> Result<Option<Vec<Type>>> {
+    let mut poll_types: Option<Vec<Type>> = None;
 
-    Ok(Some(EventHandler {
-        method_name: method.sig.ident.clone(),
-        source_field,
-        event_type,
-    }))
+    for attr in &impl_block.attrs {
+        if !attr.path().is_ident("grove") {
+            continue;
+        }
+
+        attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("poll") {
+                // Parse (&mut T1, &mut T2, ...)
+                let content;
+                syn::parenthesized!(content in meta.input);
+
+                let parser =
+                    syn::punctuated::Punctuated::<Type, syn::Token![,]>::parse_terminated;
+                let punctuated = parser.parse2(content.parse()?)?;
+                poll_types = Some(punctuated.into_iter().collect());
+            }
+            Ok(())
+        })?;
+    }
+
+    Ok(poll_types)
 }
 
 fn extract_param(
@@ -182,6 +258,23 @@ fn extract_param(
         }
     }
     Ok(None)
+}
+
+fn extract_all_params(
+    inputs: &syn::punctuated::Punctuated<FnArg, syn::token::Comma>,
+) -> Result<Vec<(Ident, Type)>> {
+    let mut params = Vec::new();
+    for input in inputs.iter() {
+        if let FnArg::Typed(pat_type) = input {
+            let param_name = match &*pat_type.pat {
+                Pat::Ident(pat_ident) => pat_ident.ident.clone(),
+                _ => continue,
+            };
+            let param_type = (*pat_type.ty).clone();
+            params.push((param_name, param_type));
+        }
+    }
+    Ok(params)
 }
 
 fn strip_grove_attrs(mut method: ImplItemFn) -> ImplItemFn {
@@ -242,16 +335,18 @@ fn generate_command_infra(
     command_enum_name: &Ident,
     handle_name: &Ident,
     commands: &[CommandMethod],
-) -> (TokenStream, TokenStream, TokenStream) {
+    poll_types: Option<&Vec<Type>>,
+) -> (TokenStream, TokenStream, TokenStream, TokenStream) {
     // Generate enum variants
     let enum_variants: Vec<TokenStream> = commands
         .iter()
         .map(|cmd| {
             let variant = &cmd.variant_name;
-            if let Some((_, ty)) = &cmd.param {
-                quote! { #variant(#ty), }
-            } else {
+            if cmd.params.is_empty() {
                 quote! { #variant, }
+            } else {
+                let types: Vec<_> = cmd.params.iter().map(|(_, ty)| ty).collect();
+                quote! { #variant(#(#types),*), }
             }
         })
         .collect();
@@ -262,16 +357,60 @@ fn generate_command_infra(
         }
     };
 
-    // Generate execute impl
+    // For poll commands, we need poll type info
+    let poll_types_vec = poll_types.cloned().unwrap_or_default();
+    let poll_param_names: Vec<Ident> = poll_types_vec
+        .iter()
+        .enumerate()
+        .map(|(i, _)| format_ident!("__poll_arg_{}", i))
+        .collect();
+
+    // Generate execute impl - poll commands queue work, regular commands run directly
     let match_arms: Vec<TokenStream> = commands
         .iter()
         .map(|cmd| {
             let variant = &cmd.variant_name;
             let method = &cmd.method_name;
-            if cmd.param.is_some() {
-                quote! { #command_enum_name::#variant(v) => state.#method(v), }
+            let param_names: Vec<_> = cmd
+                .params
+                .iter()
+                .enumerate()
+                .map(|(i, _)| format_ident!("v{}", i))
+                .collect();
+
+            if cmd.queues_for_poll {
+                // Poll command: queue work for later execution via poll()
+                let poll_types_only: Vec<_> = poll_types_vec.iter().collect();
+                let poll_param_names_ref: Vec<&Ident> = poll_param_names.iter().collect();
+
+                if cmd.params.is_empty() {
+                    quote! {
+                        #command_enum_name::#variant => {
+                            let work: Box<dyn FnOnce(&#struct_name, #(#poll_types_only),*) + Send> =
+                                Box::new(move |__this, #(#poll_param_names_ref),*| {
+                                    __this.#method(#(#poll_param_names_ref),*);
+                                });
+                            state.__grove_main_thread_queue.lock().unwrap().push(work);
+                        }
+                    }
+                } else {
+                    quote! {
+                        #command_enum_name::#variant(#(#param_names),*) => {
+                            let work: Box<dyn FnOnce(&#struct_name, #(#poll_types_only),*) + Send> =
+                                Box::new(move |__this, #(#poll_param_names_ref),*| {
+                                    __this.#method(#(#poll_param_names_ref,)* #(#param_names),*);
+                                });
+                            state.__grove_main_thread_queue.lock().unwrap().push(work);
+                        }
+                    }
+                }
             } else {
-                quote! { #command_enum_name::#variant => state.#method(), }
+                // Regular command: execute directly
+                if cmd.params.is_empty() {
+                    quote! { #command_enum_name::#variant => state.#method(), }
+                } else {
+                    quote! { #command_enum_name::#variant(#(#param_names),*) => state.#method(#(#param_names),*), }
+                }
             }
         })
         .collect();
@@ -286,22 +425,28 @@ fn generate_command_infra(
         }
     };
 
-    // Generate handle sender methods
+    // Generate handle sender methods (same for both poll and regular commands)
     let sender_methods: Vec<TokenStream> = commands
         .iter()
         .map(|cmd| {
             let method = &cmd.method_name;
             let variant = &cmd.variant_name;
-            if let Some((param_name, param_ty)) = &cmd.param {
-                quote! {
-                    pub fn #method(&self, #param_name: #param_ty) {
-                        let _ = self.cmd_tx.try_send(#command_enum_name::#variant(#param_name));
-                    }
-                }
-            } else {
+            if cmd.params.is_empty() {
                 quote! {
                     pub fn #method(&self) {
                         let _ = self.cmd_tx.try_send(#command_enum_name::#variant);
+                    }
+                }
+            } else {
+                let param_decls: Vec<TokenStream> = cmd
+                    .params
+                    .iter()
+                    .map(|(name, ty)| quote! { #name: #ty })
+                    .collect();
+                let param_names: Vec<_> = cmd.params.iter().map(|(name, _)| name).collect();
+                quote! {
+                    pub fn #method(&self, #(#param_decls),*) {
+                        let _ = self.cmd_tx.try_send(#command_enum_name::#variant(#(#param_names),*));
                     }
                 }
             }
@@ -314,7 +459,61 @@ fn generate_command_infra(
         }
     };
 
-    (command_enum, execute_impl, handle_impl)
+    // Generate service-side queueing methods for poll commands
+    // These allow the service to queue work directly (e.g., self.queue_render())
+    let poll_queue_methods: Vec<TokenStream> = commands
+        .iter()
+        .filter(|cmd| cmd.queues_for_poll)
+        .map(|cmd| {
+            let method = &cmd.method_name;
+            let queue_method = format_ident!("queue_{}", method);
+            let poll_types_only: Vec<_> = poll_types_vec.iter().collect();
+            let poll_param_names_ref: Vec<&Ident> = poll_param_names.iter().collect();
+
+            if cmd.params.is_empty() {
+                quote! {
+                    /// Queues this method to be executed via poll().
+                    pub fn #queue_method(&self) {
+                        let work: Box<dyn FnOnce(&#struct_name, #(#poll_types_only),*) + Send> =
+                            Box::new(move |__this, #(#poll_param_names_ref),*| {
+                                __this.#method(#(#poll_param_names_ref),*);
+                            });
+                        self.__grove_main_thread_queue.lock().unwrap().push(work);
+                    }
+                }
+            } else {
+                let param_decls: Vec<TokenStream> = cmd
+                    .params
+                    .iter()
+                    .map(|(name, ty)| quote! { #name: #ty })
+                    .collect();
+                let param_names: Vec<_> = cmd.params.iter().map(|(name, _)| name).collect();
+                quote! {
+                    /// Queues this method to be executed via poll().
+                    pub fn #queue_method(&self, #(#param_decls),*) {
+                        #(let #param_names = #param_names;)*
+                        let work: Box<dyn FnOnce(&#struct_name, #(#poll_types_only),*) + Send> =
+                            Box::new(move |__this, #(#poll_param_names_ref),*| {
+                                __this.#method(#(#poll_param_names_ref,)* #(#param_names),*);
+                            });
+                        self.__grove_main_thread_queue.lock().unwrap().push(work);
+                    }
+                }
+            }
+        })
+        .collect();
+
+    let service_queue_impl = if poll_queue_methods.is_empty() {
+        quote! {}
+    } else {
+        quote! {
+            impl #struct_name {
+                #(#poll_queue_methods)*
+            }
+        }
+    };
+
+    (command_enum, execute_impl, handle_impl, service_queue_impl)
 }
 
 fn generate_spawn_impl(
@@ -323,6 +522,7 @@ fn generate_spawn_impl(
     command_enum_name: &Ident,
     commands: &[CommandMethod],
     event_handlers: &[EventHandler],
+    tasks: &[TaskMethod],
 ) -> TokenStream {
     // Generate event receiver setup
     // The subscription method name is derived from the event type (e.g., MessageSent -> on_message_sent)
@@ -386,6 +586,22 @@ fn generate_spawn_impl(
         }
     };
 
+    // Generate task spawns - each task receives a clone of the handle
+    let task_spawns: Vec<TokenStream> = tasks
+        .iter()
+        .map(|task| {
+            let method_name = &task.method_name;
+            quote! {
+                {
+                    let handle = handle.clone();
+                    tokio::spawn(async move {
+                        #struct_name::#method_name(handle).await;
+                    });
+                }
+            }
+        })
+        .collect();
+
     quote! {
         impl #struct_name {
             /// Spawns this service and returns a handle for interacting with it.
@@ -408,11 +624,56 @@ fn generate_spawn_impl(
                     }
                 });
 
-                #handle_name {
+                let handle = #handle_name {
                     state,
                     cmd_tx,
+                };
+
+                // Spawn background tasks
+                #(#task_spawns)*
+
+                handle
+            }
+        }
+    }
+}
+
+/// Generate direct method wrappers on the handle.
+/// These simply forward calls to the underlying service method.
+fn generate_direct_methods(
+    _struct_name: &Ident,
+    handle_name: &Ident,
+    methods: &[DirectMethod],
+) -> TokenStream {
+    if methods.is_empty() {
+        return quote! {};
+    }
+
+    let handle_methods: Vec<TokenStream> = methods
+        .iter()
+        .map(|method| {
+            let method_name = &method.method_name;
+
+            let param_decls: Vec<TokenStream> = method
+                .params
+                .iter()
+                .map(|(name, ty)| quote! { #name: #ty })
+                .collect();
+
+            let param_names: Vec<&Ident> = method.params.iter().map(|(name, _)| name).collect();
+
+            quote! {
+                /// Direct call to this method (caller provides all arguments).
+                pub fn #method_name(&self, #(#param_decls),*) {
+                    self.state.read().unwrap().#method_name(#(#param_names),*);
                 }
             }
+        })
+        .collect();
+
+    quote! {
+        impl #handle_name {
+            #(#handle_methods)*
         }
     }
 }

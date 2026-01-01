@@ -9,15 +9,18 @@
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::{
-    parse2, Data, DeriveInput, Error, Field, Fields, FieldsNamed, Ident, Result, Type,
+    parse::Parser, parse2, Data, DeriveInput, Error, Field, Fields, FieldsNamed, Ident, Result,
+    Type,
 };
 
 /// Main entry point for the service attribute macro.
 pub fn expand(_attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
     let mut input: DeriveInput = parse2(item)?;
 
-    // Parse struct-level attributes for emits = [...]
-    let emitted_events = parse_emits(&input)?;
+    // Parse struct-level attributes
+    let attrs = parse_struct_attrs(&input)?;
+    let emitted_events = attrs.emitted_events;
+    let poll_signature = attrs.poll_types;
 
     // Get mutable access to fields
     let fields = match &mut input.data {
@@ -62,12 +65,19 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
         inject_emitter_field(fields);
     }
 
+    // Inject main thread queue field if poll is present
+    if let Some(ref poll_types) = poll_signature {
+        inject_queue_field(fields, struct_name, poll_types);
+    }
+    let has_poll = poll_signature.is_some();
+
     // Generate code
     let handle_struct = generate_handle_struct(struct_name, &handle_name, &command_type);
     let getter_impls = generate_getters(&handle_name, &getters);
     let subscription_methods = generate_subscription_methods(&handle_name, &emitted_events);
     let emit_methods = generate_emit_methods(struct_name, &emitted_events);
-    let constructor = generate_constructor(struct_name, &user_fields, has_emitter);
+    let constructor = generate_constructor(struct_name, &user_fields, has_emitter, has_poll);
+    let poll_method = generate_poll_method(struct_name, &handle_name, poll_signature.as_ref());
 
     // Remove grove attributes from struct (they've been processed)
     input.attrs.retain(|attr| !attr.path().is_ident("grove"));
@@ -88,12 +98,20 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
         #subscription_methods
         #emit_methods
         #constructor
+        #poll_method
     })
 }
 
-/// Parse #[grove(emits = [Event1, Event2])] from struct attributes.
-fn parse_emits(input: &DeriveInput) -> Result<Vec<Ident>> {
-    let mut events = Vec::new();
+/// Parsed struct-level grove attributes.
+struct StructAttrs {
+    emitted_events: Vec<Ident>,
+    poll_types: Option<Vec<Type>>,
+}
+
+/// Parse all #[grove(...)] attributes from struct.
+fn parse_struct_attrs(input: &DeriveInput) -> Result<StructAttrs> {
+    let mut emitted_events = Vec::new();
+    let mut poll_types: Option<Vec<Type>> = None;
 
     for attr in &input.attrs {
         if !attr.path().is_ident("grove") {
@@ -110,33 +128,49 @@ fn parse_emits(input: &DeriveInput) -> Result<Vec<Ident>> {
 
                 while !content.is_empty() {
                     let event: Ident = content.parse()?;
-                    events.push(event);
+                    emitted_events.push(event);
 
                     if content.is_empty() {
                         break;
                     }
                     content.parse::<syn::Token![,]>()?;
                 }
-                Ok(())
-            } else {
-                Ok(())
+            } else if meta.path.is_ident("poll") {
+                // Parse (&mut T1, &mut T2, ...)
+                let content;
+                syn::parenthesized!(content in meta.input);
+
+                let parser =
+                    syn::punctuated::Punctuated::<Type, syn::Token![,]>::parse_terminated;
+                let punctuated = parser.parse2(content.parse()?)?;
+                poll_types = Some(punctuated.into_iter().collect());
             }
+            Ok(())
         })?;
     }
 
-    Ok(events)
+    Ok(StructAttrs {
+        emitted_events,
+        poll_types,
+    })
 }
 
-/// Inject a hidden emitter field into the struct with a default value.
+/// Inject a hidden emitter field into the struct.
 fn inject_emitter_field(fields: &mut FieldsNamed) {
-    // We can't give struct fields default values directly in Rust.
-    // Instead, we'll implement Default for the struct or use a different approach.
-    // For now, we document that users should use ..Default::default() or a builder.
     let emitter_field: syn::Field = syn::parse_quote! {
         #[doc(hidden)]
         pub __grove_emitter: grove::event::Emitter
     };
     fields.named.push(emitter_field);
+}
+
+/// Inject a hidden main thread queue field into the struct.
+fn inject_queue_field(fields: &mut FieldsNamed, struct_name: &Ident, poll_types: &[Type]) {
+    let queue_field: syn::Field = syn::parse_quote! {
+        #[doc(hidden)]
+        pub __grove_main_thread_queue: std::sync::Mutex<Vec<Box<dyn FnOnce(&#struct_name, #(#poll_types),*) + Send>>>
+    };
+    fields.named.push(queue_field);
 }
 
 // ============================================================================
@@ -262,6 +296,7 @@ fn generate_constructor(
     struct_name: &Ident,
     user_fields: &[(Ident, Type)],
     has_emitter: bool,
+    has_poll: bool,
 ) -> TokenStream {
     let params: Vec<TokenStream> = user_fields
         .iter()
@@ -279,6 +314,12 @@ fn generate_constructor(
         quote! {}
     };
 
+    let queue_init = if has_poll {
+        quote! { __grove_main_thread_queue: std::sync::Mutex::new(Vec::new()), }
+    } else {
+        quote! {}
+    };
+
     quote! {
         impl #struct_name {
             /// Creates a new instance of this service.
@@ -286,6 +327,7 @@ fn generate_constructor(
                 Self {
                     #(#field_inits,)*
                     #emitter_init
+                    #queue_init
                 }
             }
         }
@@ -356,4 +398,70 @@ fn to_snake_case(s: &str) -> String {
         }
     }
     result
+}
+
+/// Generate the poll() method on the handle.
+fn generate_poll_method(
+    _struct_name: &Ident,
+    handle_name: &Ident,
+    poll_types: Option<&Vec<Type>>,
+) -> TokenStream {
+    let poll_types = match poll_types {
+        Some(t) => t,
+        None => return quote! {},
+    };
+
+    // Generate parameter names and declarations
+    let poll_params: Vec<_> = poll_types
+        .iter()
+        .enumerate()
+        .map(|(i, ty)| {
+            let name = format_ident!("__poll_arg_{}", i);
+            (name, ty)
+        })
+        .collect();
+
+    let param_decls: Vec<TokenStream> = poll_params
+        .iter()
+        .map(|(name, ty)| quote! { #name: #ty })
+        .collect();
+
+    let param_names: Vec<&Ident> = poll_params.iter().map(|(name, _)| name).collect();
+
+    quote! {
+        impl #handle_name {
+            /// Returns true if there is queued work waiting to be executed.
+            pub fn has_queued_work(&self) -> bool {
+                !self.state.read().unwrap()
+                    .__grove_main_thread_queue
+                    .lock()
+                    .unwrap()
+                    .is_empty()
+            }
+
+            /// Executes all queued main-thread work.
+            ///
+            /// Call this from the main thread to run work that was queued
+            /// by `#[grove(command, poll)]` handlers.
+            ///
+            /// Returns `true` if any work was executed.
+            pub fn poll(&self, #(#param_decls),*) -> bool {
+                // Drain the queue while holding the lock briefly
+                let queue: Vec<_> = {
+                    self.state.write().unwrap()
+                        .__grove_main_thread_queue
+                        .lock()
+                        .unwrap()
+                        .drain(..)
+                        .collect()
+                };
+                let had_work = !queue.is_empty();
+                // Execute each work item with read access to state
+                for work in queue {
+                    work(&*self.state.read().unwrap(), #(#param_names),*);
+                }
+                had_work
+            }
+        }
+    }
 }

@@ -1,0 +1,11 @@
+[package]
+name = "tui-retained"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+grove = { path = "../../crates/grove" }
+ratatui = "0.29"
+crossterm = "0.28"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+anyhow = "1"
