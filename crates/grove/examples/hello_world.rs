@@ -47,7 +47,6 @@ struct Chat {
     #[grove(get)]
     messages: Vec<Message>,
 
-    #[grove(skip)]
     notifications: NotificationServiceHandle,
 }
 

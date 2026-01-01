@@ -61,7 +61,6 @@ struct Analytics {
     #[grove(get)]
     message_count: usize,
 
-    #[grove(skip)]
     chat: ChatHandle,
 }
 

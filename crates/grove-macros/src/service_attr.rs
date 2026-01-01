@@ -166,13 +166,10 @@ impl GetterField {
             }
 
             let mut is_getter = false;
-            let mut is_skip = false;
 
             attr.parse_nested_meta(|meta| {
                 if meta.path.is_ident("get") {
                     is_getter = true;
-                } else if meta.path.is_ident("skip") {
-                    is_skip = true;
                 }
                 Ok(())
             })?;
@@ -182,10 +179,6 @@ impl GetterField {
                     name,
                     ty: field.ty.clone(),
                 }));
-            }
-
-            if is_skip {
-                return Ok(None);
             }
         }
 

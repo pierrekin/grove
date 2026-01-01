@@ -116,14 +116,11 @@ impl GetterField {
             }
 
             let mut is_getter = false;
-            let mut is_skip = false;
             let mut is_emitter = false;
 
             attr.parse_nested_meta(|meta| {
                 if meta.path.is_ident("get") {
                     is_getter = true;
-                } else if meta.path.is_ident("skip") {
-                    is_skip = true;
                 } else if meta.path.is_ident("emitter") {
                     is_emitter = true;
                 }
@@ -137,7 +134,7 @@ impl GetterField {
                 }));
             }
 
-            if is_skip || is_emitter {
+            if is_emitter {
                 return Ok(None);
             }
         }
