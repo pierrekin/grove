@@ -1,0 +1,26 @@
+[package]
+name = "grove-macros"
+version.workspace = true
+edition.workspace = true
+description = "Procedural macros for the Grove actor framework"
+
+# This is the magic line - it tells Rust this crate provides procedural macros.
+# Proc-macro crates have restrictions: they can ONLY export procedural macros,
+# no regular functions, types, or traits.
+[lib]
+proc-macro = true
+
+[dependencies]
+# syn: Parses Rust source code into an AST (Abstract Syntax Tree).
+# We use it to understand the struct the user wrote.
+# - "full" feature: enables parsing of all Rust syntax (we need struct definitions)
+# - "extra-traits": adds Debug, Eq, Hash impls for AST nodes (useful for debugging)
+syn = { version = "2", features = ["full", "extra-traits"] }
+
+# quote: Generates Rust code from templates. Think of it as a macro for writing macros.
+# The `quote!` macro lets you write code that looks like regular Rust.
+quote = "1"
+
+# proc-macro2: A wrapper around the compiler's proc_macro types.
+# Needed because syn and quote use proc-macro2 types, not the raw proc_macro types.
+proc-macro2 = "1"

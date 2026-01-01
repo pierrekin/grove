@@ -1,0 +1,11 @@
+[package]
+name = "grove"
+version.workspace = true
+edition.workspace = true
+description = "A macro-based actor framework for Rust"
+
+[dependencies]
+grove-macros = { path = "../grove-macros" }
+
+# Runtime dependencies for generated code
+tokio = { version = "1", features = ["sync", "rt-multi-thread", "macros", "time"] }

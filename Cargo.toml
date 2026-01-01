@@ -1,0 +1,14 @@
+# Grove: A macro-based actor framework for Rust
+#
+# This workspace contains:
+# - grove: The main crate users depend on (re-exports macros + runtime)
+# - grove-macros: Procedural macros (derive macros must live in their own crate)
+
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "MIT"
