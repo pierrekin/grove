@@ -6,7 +6,6 @@
 //!
 //! Run with: `cargo run --example hello_world`
 
-use grove::Service;
 
 // =============================================================================
 // Notification Service (leaf node - no dependencies)
@@ -18,13 +17,13 @@ struct Notification {
     text: String,
 }
 
-#[derive(Default, Service)]
+#[grove::service]
 struct NotificationService {
     #[grove(get)]
     sent_count: usize,
 }
 
-#[grove::commands]
+#[grove::handlers]
 impl NotificationService {
     #[grove(command)]
     fn notify(&mut self, n: Notification) {
@@ -43,7 +42,7 @@ struct Message {
     content: String,
 }
 
-#[derive(Service)]
+#[grove::service]
 struct Chat {
     #[grove(get)]
     messages: Vec<Message>,
@@ -52,7 +51,7 @@ struct Chat {
     notifications: NotificationServiceHandle,
 }
 
-#[grove::commands]
+#[grove::handlers]
 impl Chat {
     #[grove(command)]
     fn send(&mut self, msg: Message) {
@@ -73,14 +72,10 @@ impl Chat {
 #[tokio::main]
 async fn main() {
     // Spawn leaf services first (no dependencies)
-    let notifications = NotificationService::default().spawn();
+    let notifications = NotificationService::new(0).spawn();
 
     // Spawn dependent services, injecting handles
-    let chat = Chat {
-        messages: vec![],
-        notifications: notifications.clone(),
-    }
-    .spawn();
+    let chat = Chat::new(vec![], notifications.clone()).spawn();
 
     // Use the generated sender methods
     chat.send(Message {
