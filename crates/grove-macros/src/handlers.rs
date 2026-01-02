@@ -44,6 +44,8 @@ struct EventHandler {
 struct TaskMethod {
     /// The method name
     method_name: Ident,
+    /// Extra parameters beyond handle (name, type) - empty if handle-only
+    extra_params: Vec<(Ident, Type)>,
 }
 
 /// Main entry point for the handlers attribute macro.
@@ -114,8 +116,12 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
                 });
                 clean_items.push(ImplItem::Fn(strip_grove_attrs(method.clone())));
             } else if attrs.is_task {
+                let all_params = extract_all_params(&method.sig.inputs)?;
+                // Skip first param (handle), keep the rest as extra params
+                let extra_params = all_params.into_iter().skip(1).collect();
                 task_methods.push(TaskMethod {
                     method_name: method.sig.ident.clone(),
+                    extra_params,
                 });
                 clean_items.push(ImplItem::Fn(strip_grove_attrs(method.clone())));
             } else {
@@ -524,15 +530,16 @@ fn generate_spawn_impl(
     event_handlers: &[EventHandler],
     tasks: &[TaskMethod],
 ) -> TokenStream {
+    // Check if any task has extra parameters (requires builder pattern)
+    let has_context_tasks = tasks.iter().any(|t| !t.extra_params.is_empty());
+
     // Generate event receiver setup
-    // The subscription method name is derived from the event type (e.g., MessageSent -> on_message_sent)
     let event_receiver_setup: Vec<TokenStream> = event_handlers
         .iter()
         .map(|handler| {
             let field = &handler.source_field;
             let handler_method = &handler.method_name;
             let rx_name = format_ident!("{}_rx", handler_method);
-            // Derive subscription method from event type
             let subscription_method = derive_subscription_method(&handler.event_type);
             quote! {
                 let mut #rx_name = self.#field.#subscription_method();
@@ -580,13 +587,43 @@ fn generate_spawn_impl(
             }
         }
     } else {
-        // Neither commands nor events - shouldn't really happen, but handle gracefully
         quote! {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
     };
 
-    // Generate task spawns - each task receives a clone of the handle
+    if has_context_tasks {
+        // Generate builder pattern
+        generate_spawn_with_builder(
+            struct_name,
+            handle_name,
+            command_enum_name,
+            tasks,
+            &event_receiver_setup,
+            &loop_body,
+        )
+    } else {
+        // Generate simple spawn (current behavior)
+        generate_spawn_simple(
+            struct_name,
+            handle_name,
+            command_enum_name,
+            tasks,
+            &event_receiver_setup,
+            &loop_body,
+        )
+    }
+}
+
+/// Generate simple spawn() when all tasks are handle-only
+fn generate_spawn_simple(
+    struct_name: &Ident,
+    handle_name: &Ident,
+    command_enum_name: &Ident,
+    tasks: &[TaskMethod],
+    event_receiver_setup: &[TokenStream],
+    loop_body: &TokenStream,
+) -> TokenStream {
     let task_spawns: Vec<TokenStream> = tasks
         .iter()
         .map(|task| {
@@ -608,10 +645,8 @@ fn generate_spawn_impl(
             pub fn spawn(mut self) -> #handle_name {
                 let (cmd_tx, mut cmd_rx) = grove::runtime::mpsc::channel::<#command_enum_name>(256);
 
-                // Wire up event channels (no-op if service doesn't emit events)
                 self.__wire_emitter();
 
-                // Subscribe to events BEFORE moving self into Arc
                 #(#event_receiver_setup)*
 
                 let state = grove::runtime::Arc::new(grove::runtime::RwLock::new(self));
@@ -629,7 +664,178 @@ fn generate_spawn_impl(
                     cmd_tx,
                 };
 
-                // Spawn background tasks
+                #(#task_spawns)*
+
+                handle
+            }
+        }
+    }
+}
+
+/// Generate builder pattern when any task has extra parameters
+fn generate_spawn_with_builder(
+    struct_name: &Ident,
+    handle_name: &Ident,
+    command_enum_name: &Ident,
+    tasks: &[TaskMethod],
+    event_receiver_setup: &[TokenStream],
+    loop_body: &TokenStream,
+) -> TokenStream {
+    let builder_name = format_ident!("__{struct_name}Builder");
+
+    // Generate builder struct fields for tasks with extra params
+    let builder_fields: Vec<TokenStream> = tasks
+        .iter()
+        .filter(|t| !t.extra_params.is_empty())
+        .map(|task| {
+            let field_name = format_ident!("{}_ctx", task.method_name);
+            let types: Vec<_> = task.extra_params.iter().map(|(_, ty)| ty).collect();
+            quote! {
+                #field_name: Option<(#(#types,)*)>
+            }
+        })
+        .collect();
+
+
+    // Generate spawn_<task> methods on the service (returns builder)
+    let service_spawn_methods: Vec<TokenStream> = tasks
+        .iter()
+        .filter(|t| !t.extra_params.is_empty())
+        .map(|task| {
+            let method_name = format_ident!("spawn_{}", task.method_name);
+            let field_name = format_ident!("{}_ctx", task.method_name);
+            let param_decls: Vec<TokenStream> = task
+                .extra_params
+                .iter()
+                .map(|(name, ty)| quote! { #name: #ty })
+                .collect();
+            let param_names: Vec<_> = task.extra_params.iter().map(|(name, _)| name).collect();
+
+            // Initialize other context fields to None
+            let other_inits: Vec<TokenStream> = tasks
+                .iter()
+                .filter(|t| !t.extra_params.is_empty() && t.method_name != task.method_name)
+                .map(|t| {
+                    let fname = format_ident!("{}_ctx", t.method_name);
+                    quote! { #fname: None }
+                })
+                .collect();
+
+            quote! {
+                pub fn #method_name(self, #(#param_decls),*) -> #builder_name {
+                    #builder_name {
+                        inner: self,
+                        #field_name: Some((#(#param_names,)*)),
+                        #(#other_inits,)*
+                    }
+                }
+            }
+        })
+        .collect();
+
+    // Generate spawn_<task> methods on the builder (for chaining)
+    let builder_spawn_methods: Vec<TokenStream> = tasks
+        .iter()
+        .filter(|t| !t.extra_params.is_empty())
+        .map(|task| {
+            let method_name = format_ident!("spawn_{}", task.method_name);
+            let field_name = format_ident!("{}_ctx", task.method_name);
+            let param_decls: Vec<TokenStream> = task
+                .extra_params
+                .iter()
+                .map(|(name, ty)| quote! { #name: #ty })
+                .collect();
+            let param_names: Vec<_> = task.extra_params.iter().map(|(name, _)| name).collect();
+
+            quote! {
+                pub fn #method_name(mut self, #(#param_decls),*) -> Self {
+                    self.#field_name = Some((#(#param_names,)*));
+                    self
+                }
+            }
+        })
+        .collect();
+
+    // Generate task spawns in builder's spawn() - handles both context and handle-only tasks
+    let task_spawns: Vec<TokenStream> = tasks
+        .iter()
+        .map(|task| {
+            let method_name = &task.method_name;
+            if task.extra_params.is_empty() {
+                // Handle-only task
+                quote! {
+                    {
+                        let handle = handle.clone();
+                        tokio::spawn(async move {
+                            #struct_name::#method_name(handle).await;
+                        });
+                    }
+                }
+            } else {
+                // Context task - extract from builder
+                let field_name = format_ident!("{}_ctx", task.method_name);
+                let param_names: Vec<_> = task
+                    .extra_params
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _)| format_ident!("__ctx_{}", i))
+                    .collect();
+
+                quote! {
+                    if let Some((#(#param_names,)*)) = self.#field_name {
+                        let handle = handle.clone();
+                        tokio::spawn(async move {
+                            #struct_name::#method_name(handle, #(#param_names),*).await;
+                        });
+                    }
+                }
+            }
+        })
+        .collect();
+
+    quote! {
+        // Hidden builder struct
+        #[doc(hidden)]
+        pub struct #builder_name {
+            inner: #struct_name,
+            #(#builder_fields,)*
+        }
+
+        impl #struct_name {
+            /// Internal: spawns actor without tasks (used by builder)
+            fn __spawn_core(mut self) -> #handle_name {
+                let (cmd_tx, mut cmd_rx) = grove::runtime::mpsc::channel::<#command_enum_name>(256);
+
+                self.__wire_emitter();
+
+                #(#event_receiver_setup)*
+
+                let state = grove::runtime::Arc::new(grove::runtime::RwLock::new(self));
+                let state_clone = state.clone();
+
+                tokio::spawn(async move {
+                    let state = state_clone;
+                    loop {
+                        #loop_body
+                    }
+                });
+
+                #handle_name {
+                    state,
+                    cmd_tx,
+                }
+            }
+
+            #(#service_spawn_methods)*
+        }
+
+        impl #builder_name {
+            #(#builder_spawn_methods)*
+
+            /// Spawns this service and returns a handle for interacting with it.
+            pub fn spawn(self) -> #handle_name {
+                let handle = self.inner.__spawn_core();
+
                 #(#task_spawns)*
 
                 handle

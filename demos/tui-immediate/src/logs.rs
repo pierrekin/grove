@@ -2,7 +2,7 @@ use ratatui::{
     prelude::*,
     widgets::{Block, Borders, List, ListItem, Paragraph},
 };
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 // =============================================================================
 // Service - Immediate Mode Pattern using #[grove(direct)]
@@ -11,6 +11,9 @@ use std::time::Instant;
 // This example demonstrates the "direct" pattern for immediate-mode UIs.
 // The main loop calls render_logs() directly every frame, and the service
 // just manages state. This is the natural pattern for ratatui/egui.
+//
+// It also demonstrates task init context - the generate_logs task receives
+// configuration at spawn time via the builder pattern.
 
 #[grove::service]
 pub struct LogService {
@@ -32,25 +35,42 @@ pub enum LogLevel {
     Error,
 }
 
+/// Configuration for the log generator task - passed at spawn time
+pub struct LogGeneratorConfig {
+    pub interval: Duration,
+    pub messages: Vec<(LogLevel, &'static str)>,
+}
+
+impl Default for LogGeneratorConfig {
+    fn default() -> Self {
+        Self {
+            interval: Duration::from_secs(2),
+            messages: vec![
+                (LogLevel::Info, "System heartbeat"),
+                (LogLevel::Info, "Connection pool healthy"),
+                (LogLevel::Warn, "Memory usage above 70%"),
+                (LogLevel::Info, "Cache hit ratio: 94%"),
+                (LogLevel::Error, "Failed to reach backup server"),
+                (LogLevel::Info, "Retry succeeded"),
+            ],
+        }
+    }
+}
+
 #[grove::handlers]
 impl LogService {
-    /// Background task that generates periodic log entries
+    /// Background task that generates periodic log entries.
+    ///
+    /// This task demonstrates task init context - it receives configuration
+    /// at spawn time via `spawn_generate_logs(config)`.
     #[grove(task)]
-    async fn generate_logs(handle: LogServiceHandle) {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
-        let messages = [
-            (LogLevel::Info, "System heartbeat"),
-            (LogLevel::Info, "Connection pool healthy"),
-            (LogLevel::Warn, "Memory usage above 70%"),
-            (LogLevel::Info, "Cache hit ratio: 94%"),
-            (LogLevel::Error, "Failed to reach backup server"),
-            (LogLevel::Info, "Retry succeeded"),
-        ];
+    async fn generate_logs(handle: LogServiceHandle, config: LogGeneratorConfig) {
+        let mut interval = tokio::time::interval(config.interval);
         let mut idx = 0;
 
         loop {
             interval.tick().await;
-            let (level, msg) = messages[idx % messages.len()];
+            let (level, msg) = config.messages[idx % config.messages.len()];
             handle.add_entry(level, msg.to_string());
             idx += 1;
         }

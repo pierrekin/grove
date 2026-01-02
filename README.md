@@ -163,6 +163,43 @@ impl PriceService {
 
 Tasks receive a clone of the handle and run independently.
 
+### Task Init Context
+
+Tasks can receive additional parameters beyond the handle. These are passed at spawn time via generated builder methods:
+
+```rust
+pub struct PollConfig {
+    pub interval: Duration,
+    pub endpoint: String,
+}
+
+#[grove::handlers]
+impl PriceService {
+    #[grove(task)]
+    async fn poll_prices(handle: PriceServiceHandle, config: PollConfig) {
+        let mut interval = tokio::time::interval(config.interval);
+        loop {
+            interval.tick().await;
+            let price = fetch_price(&config.endpoint).await;
+            handle.update_price(price);
+        }
+    }
+}
+
+// Spawn with config
+let service = PriceService::new(0.0)
+    .spawn_poll_prices(PollConfig {
+        interval: Duration::from_secs(60),
+        endpoint: "https://api.example.com".into(),
+    })
+    .spawn();
+```
+
+When a task has extra parameters:
+- `spawn_<task_name>(args)` is generated on the service
+- `spawn()` is only available after calling the spawn method for each context task
+- Multiple tasks can be chained: `.spawn_task_a(args).spawn_task_b(args).spawn()`
+
 ## UI Integration
 
 Grove supports two patterns for UI frameworks:
@@ -262,20 +299,20 @@ Every service generates a `{Service}Handle` with:
 
 ### Method Attributes
 
-| Attribute                  | Description                                  |
-|----------------------------|----------------------------------------------|
-| `#[grove(command)]`        | Async command handler with `&mut self`       |
-| `#[grove(command, poll)]`  | Command that queues work for `poll()`        |
-| `#[grove(direct)]`         | Direct read-only method exposed on handle    |
-| `#[grove(from = field)]`   | Event handler subscribing to another service |
-| `#[grove(task)]`           | Background async task spawned with service   |
+| Attribute                  | Description                                                   |
+|----------------------------|---------------------------------------------------------------|
+| `#[grove(command)]`        | Async command handler with `&mut self`                        |
+| `#[grove(command, poll)]`  | Command that queues work for `poll()`                         |
+| `#[grove(direct)]`         | Direct read-only method exposed on handle                     |
+| `#[grove(from = field)]`   | Event handler subscribing to another service                  |
+| `#[grove(task)]`           | Background async task; extra params become spawn-time context |
 
 ## Demos
 
 See the `demos/` directory for full applications:
 
 - **egui-counter** - Event-driven counter with egui UI
-- **tui-immediate** - Immediate-mode rendering with ratatui
+- **tui-immediate** - Immediate-mode rendering with ratatui, demonstrates task init context
 - **tui-retained** - Retained-mode rendering with poll queue
 
 For smaller examples, see `crates/grove/examples/`:

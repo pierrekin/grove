@@ -5,7 +5,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
-use logs::{LogService, LogServiceHandle};
+use logs::{LogGeneratorConfig, LogService, LogServiceHandle};
 use ratatui::prelude::*;
 use std::io::stdout;
 use std::time::Instant;
@@ -14,8 +14,11 @@ fn main() -> anyhow::Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
     let _guard = rt.enter();
 
-    // Start the log service
-    let logs = LogService::new(vec![], Instant::now()).spawn();
+    // Start the log service with task init context
+    // The generate_logs task receives its config via spawn_generate_logs()
+    let logs = LogService::new(vec![], Instant::now())
+        .spawn_generate_logs(LogGeneratorConfig::default())
+        .spawn();
 
     // Set up terminal
     enable_raw_mode()?;
