@@ -75,7 +75,8 @@ This generates:
 - `MyService::new(...)` - constructor taking all fields
 - `handle.public_field()` - getter for fields marked with `#[grove(get)]`
 - `handle.on_event1()` - subscription methods for declared events
-- `self.emit_event1(...)` - emit methods for declared events
+- `self.emit_event1(...)` - emit methods on the service (for commands)
+- `handle.emit_event1(...)` - emit methods on the handle (for tasks)
 
 ## Command Handlers
 
@@ -162,6 +163,19 @@ impl PriceService {
 ```
 
 Tasks receive a clone of the handle and run independently.
+
+Tasks can also emit events directly via the handle, without needing a pass-through command:
+
+```rust
+#[grove(task)]
+async fn poll_prices(handle: PriceServiceHandle) {
+    loop {
+        let price = fetch_price().await;
+        handle.emit_price_updated(PriceUpdated { price });  // Emit directly
+        tokio::time::sleep(Duration::from_secs(60)).await;
+    }
+}
+```
 
 ### Task Init Context
 
@@ -277,6 +291,7 @@ Every service generates a `{Service}Handle` with:
 | `handle.command(args)`       | Send a command (async, queued)                        |
 | `handle.field()`             | Read a `#[grove(get)]` field (sync, cloned)           |
 | `handle.on_event()`          | Subscribe to an event (returns `broadcast::Receiver`) |
+| `handle.emit_event(e)`       | Emit an event (useful from tasks)                     |
 | `handle.direct_method(args)` | Call a `#[grove(direct)]` method (sync, read access)  |
 | `handle.poll(args)`          | Execute queued poll work                              |
 | `handle.has_queued_work()`   | Check for pending poll work                           |

@@ -270,7 +270,7 @@ fn generate_subscription_methods(handle_name: &Ident, emitted_events: &[Ident]) 
         return quote! {};
     }
 
-    let methods: Vec<TokenStream> = emitted_events
+    let subscription_methods: Vec<TokenStream> = emitted_events
         .iter()
         .map(|event| {
             let method_name = format_ident!("on_{}", to_snake_case(&event.to_string()));
@@ -284,9 +284,24 @@ fn generate_subscription_methods(handle_name: &Ident, emitted_events: &[Ident]) 
         })
         .collect();
 
+    let emit_methods: Vec<TokenStream> = emitted_events
+        .iter()
+        .map(|event| {
+            let method_name = format_ident!("emit_{}", to_snake_case(&event.to_string()));
+
+            quote! {
+                /// Emit this event to all subscribers.
+                pub fn #method_name(&self, event: #event) {
+                    self.state.read().unwrap().__grove_emitter.emit(event);
+                }
+            }
+        })
+        .collect();
+
     quote! {
         impl #handle_name {
-            #(#methods)*
+            #(#subscription_methods)*
+            #(#emit_methods)*
         }
     }
 }

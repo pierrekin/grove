@@ -1,14 +1,14 @@
 //! # Grove Events Example
 //!
 //! Demonstrates the event broker system:
-//! - `Chat` emits `MessageSent` events
-//! - `Analytics` subscribes to those events from the chat service
-//!
-//! The DAG: Chat -> Analytics (events flow up)
+//! - `Chat` emits `MessageSent` events from commands
+//! - `MessageGenerator` emits `MessageSent` events directly from a task
+//! - `Analytics` subscribes to events from both services
 //!
 //! Run with: `cargo run --example events`
 
 use grove::Event;
+use std::time::Duration;
 
 // =============================================================================
 // Events
@@ -53,7 +53,36 @@ impl Chat {
 }
 
 // =============================================================================
-// Analytics Service (subscribes to MessageSent from chat)
+// Message Generator (emits events directly from a task)
+// =============================================================================
+//
+// This service demonstrates emitting events from a background task.
+// The task emits directly via handle.emit_*() - no command wrapper needed.
+
+#[grove::service]
+#[grove(emits = [MessageSent])]
+struct MessageGenerator {}
+
+#[grove::handlers]
+impl MessageGenerator {
+    /// Background task that emits events directly via the handle.
+    /// No pass-through command needed - tasks can emit via handle.emit_*()
+    #[grove(task)]
+    async fn generate(handle: MessageGeneratorHandle) {
+        let messages = ["Ping!", "Background task running", "Still here"];
+        for msg in messages {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            // Emit directly from task - no command wrapper needed!
+            handle.emit_message_sent(MessageSent {
+                author_id: 0, // System
+                content: msg.to_string(),
+            });
+        }
+    }
+}
+
+// =============================================================================
+// Analytics Service (subscribes to MessageSent from both services)
 // =============================================================================
 
 #[grove::service]
@@ -62,17 +91,25 @@ struct Analytics {
     message_count: usize,
 
     chat: ChatHandle,
+    generator: MessageGeneratorHandle,
 }
 
 #[grove::handlers]
 impl Analytics {
     // Subscribe to MessageSent events from the chat field
     #[grove(from = chat)]
-    fn on_message_sent(&mut self, event: MessageSent) {
+    fn on_chat_message(&mut self, event: MessageSent) {
         println!(
             "📊 Analytics: User {} sent '{}'",
             event.author_id, event.content
         );
+        self.message_count += 1;
+    }
+
+    // Subscribe to MessageSent events from the generator (emitted from task)
+    #[grove(from = generator)]
+    fn on_generator_message(&mut self, event: MessageSent) {
+        println!("📊 Analytics: System broadcast '{}'", event.content);
         self.message_count += 1;
     }
 }
@@ -83,13 +120,16 @@ impl Analytics {
 
 #[tokio::main]
 async fn main() {
-    // Spawn Chat - emitter is wired automatically!
+    // Spawn Chat - emits events from commands
     let chat = Chat::new(vec![]).spawn();
 
-    // Spawn Analytics, passing the chat handle for event subscription
-    let analytics = Analytics::new(0, chat.clone()).spawn();
+    // Spawn MessageGenerator - emits events directly from a task
+    let generator = MessageGenerator::new().spawn();
 
-    // Send some messages
+    // Spawn Analytics, subscribing to events from both services
+    let analytics = Analytics::new(0, chat.clone(), generator.clone()).spawn();
+
+    // Send some messages via command
     chat.send(Message {
         author_id: 1,
         content: "Hello from Grove!".into(),
@@ -100,8 +140,8 @@ async fn main() {
         content: "Events are working!".into(),
     });
 
-    // Give the service loops time to process
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    // Give time for the generator task to emit its events
+    tokio::time::sleep(Duration::from_millis(150)).await;
 
     // Check the analytics
     println!("\n📈 Analytics Stats:");
