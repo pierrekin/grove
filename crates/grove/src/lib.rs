@@ -96,6 +96,12 @@ pub mod event {
         senders: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
     }
 
+    impl Default for EmitterBuilder {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
     impl EmitterBuilder {
         pub fn new() -> Self {
             Self {

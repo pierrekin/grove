@@ -27,6 +27,6 @@ impl Status {
 
 pub fn show(ctx: &egui::Context, handle: &StatusHandle) {
     egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
-        ui.label(&handle.message());
+        ui.label(handle.message());
     });
 }

@@ -11,7 +11,7 @@ fn main() -> eframe::Result<()> {
 
     // Wire up services
     let counter = Counter::new(0).spawn();
-    let status = Status::new("Ready".to_string(), counter.clone()).spawn();
+    let status: StatusHandle = Status::new("Ready".to_string(), counter.clone()).spawn();
 
     eframe::run_native(
         "Grove + egui",
