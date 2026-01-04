@@ -25,16 +25,19 @@ fn main() -> anyhow::Result<()> {
     stdout().execute(EnterAlternateScreen)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
 
-    let result = run(&mut terminal, logs);
+    let result = run(&mut terminal, &logs);
 
     // Restore terminal
     disable_raw_mode()?;
     stdout().execute(LeaveAlternateScreen)?;
 
+    // Clean shutdown: cancel tasks and wait for completion
+    logs.cancel_tasks().wait()?;
+
     result
 }
 
-fn run(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, logs: LogServiceHandle) -> anyhow::Result<()> {
+fn run(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, logs: &LogServiceHandle) -> anyhow::Result<()> {
     loop {
         terminal.draw(|frame| {
             // Render every frame (immediate-mode UI pattern)

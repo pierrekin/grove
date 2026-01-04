@@ -74,6 +74,9 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
     // Always inject cancellation token for graceful shutdown
     inject_cancel_token_field(fields);
 
+    // Always inject join handles for task completion tracking
+    inject_join_handles_field(fields);
+
     // Generate code
     let handle_struct = generate_handle_struct(struct_name, &handle_name, &command_type);
     let getter_impls = generate_getters(&handle_name, &getters);
@@ -178,6 +181,15 @@ fn inject_cancel_token_field(fields: &mut FieldsNamed) {
     fields.named.push(cancel_field);
 }
 
+/// Inject a hidden join handles field into the struct for task completion tracking.
+fn inject_join_handles_field(fields: &mut FieldsNamed) {
+    let join_handles_field: syn::Field = syn::parse_quote! {
+        #[doc(hidden)]
+        pub __grove_join_handles: grove::runtime::Arc<grove::runtime::Mutex<Vec<grove::runtime::JoinHandle<()>>>>
+    };
+    fields.named.push(join_handles_field);
+}
+
 /// Inject a hidden main thread queue field into the struct.
 fn inject_queue_field(fields: &mut FieldsNamed, struct_name: &Ident, poll_types: &[Type]) {
     let queue_field: syn::Field = syn::parse_quote! {
@@ -204,7 +216,10 @@ impl GetterField {
             .expect("we already verified these are named fields");
 
         // Skip injected grove fields
-        if name == "__grove_emitter" || name == "__grove_cancel_token" {
+        if name == "__grove_emitter"
+            || name == "__grove_cancel_token"
+            || name == "__grove_join_handles"
+        {
             return Ok(None);
         }
 
@@ -358,7 +373,20 @@ fn generate_constructor(
                     #emitter_init
                     #queue_init
                     __grove_cancel_token: grove::runtime::CancellationToken::new(),
+                    __grove_join_handles: grove::runtime::Arc::new(grove::runtime::Mutex::new(Vec::new())),
                 }
+            }
+
+            /// Signals all tasks to cancel gracefully and returns a completion handle.
+            ///
+            /// This cancels the service's cancellation token. Tasks should check
+            /// for cancellation in their loops using `tokio::select!` with
+            /// `token.cancelled()`.
+            ///
+            /// Use the returned `TaskCompletion` to wait for tasks to finish.
+            pub fn cancel_tasks(&self) -> grove::runtime::TaskCompletion {
+                self.__grove_cancel_token.cancel();
+                grove::runtime::TaskCompletion::new(self.__grove_join_handles.clone())
             }
         }
     }
@@ -430,7 +458,7 @@ fn to_snake_case(s: &str) -> String {
     result
 }
 
-/// Generate shutdown() and cancel_token() methods on the handle.
+/// Generate cancel_tasks(), task_completion(), and cancel_token() methods on the handle.
 fn generate_shutdown_method(handle_name: &Ident) -> TokenStream {
     quote! {
         impl #handle_name {
@@ -441,13 +469,23 @@ fn generate_shutdown_method(handle_name: &Ident) -> TokenStream {
                 self.state.read().unwrap().__grove_cancel_token.clone()
             }
 
-            /// Signals all tasks to shut down gracefully.
+            /// Signals all tasks to cancel gracefully and returns a completion handle.
             ///
             /// This cancels the service's cancellation token. Tasks should check
             /// for cancellation in their loops using `tokio::select!` with
             /// `token.cancelled()`.
-            pub fn shutdown(&self) {
+            ///
+            /// Use the returned `TaskCompletion` to wait for tasks to finish.
+            pub fn cancel_tasks(&self) -> grove::runtime::TaskCompletion {
                 self.state.read().unwrap().__grove_cancel_token.cancel();
+                self.task_completion()
+            }
+
+            /// Returns a handle for waiting on task completion.
+            ///
+            /// This can be used to monitor task status without cancelling.
+            pub fn task_completion(&self) -> grove::runtime::TaskCompletion {
+                grove::runtime::TaskCompletion::new(self.state.read().unwrap().__grove_join_handles.clone())
             }
         }
     }

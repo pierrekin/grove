@@ -24,18 +24,21 @@ fn main() -> anyhow::Result<()> {
     stdout().execute(EnterAlternateScreen)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
 
-    let result = run(&mut terminal, counter);
+    let result = run(&mut terminal, &counter);
 
     // Restore terminal
     disable_raw_mode()?;
     stdout().execute(LeaveAlternateScreen)?;
+
+    // Clean shutdown: cancel tasks and wait for completion
+    counter.cancel_tasks().wait()?;
 
     result
 }
 
 fn run(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
-    counter: CounterServiceHandle,
+    counter: &CounterServiceHandle,
 ) -> anyhow::Result<()> {
     loop {
         // Only redraw when there's queued work (retained-mode pattern)

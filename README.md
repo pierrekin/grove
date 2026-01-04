@@ -173,7 +173,12 @@ Tasks receive:
 1. A clone of the handle
 2. A `CancellationToken` for graceful shutdown
 
-Call `handle.shutdown()` to signal all tasks to stop.
+Call `handle.cancel_tasks()` to signal all tasks to stop and wait for completion:
+
+```rust
+let completion = handle.cancel_tasks();
+completion.wait()?;  // blocks until all tasks finish
+```
 
 Tasks can also emit events directly via the handle:
 
@@ -318,7 +323,8 @@ Every service generates a `{Service}Handle` with:
 | `handle.direct_method(args)` | Call a `#[grove(direct)]` method (sync, read access)  |
 | `handle.poll(args)`          | Execute queued poll work                              |
 | `handle.has_queued_work()`   | Check for pending poll work                           |
-| `handle.shutdown()`          | Signal all tasks to stop via cancellation token       |
+| `handle.cancel_tasks()`      | Signal tasks to stop, returns `TaskCompletion`        |
+| `handle.task_completion()`   | Get `TaskCompletion` for waiting on tasks             |
 | `handle.cancel_token()`      | Get the cancellation token for manual use             |
 
 ## Attribute Reference

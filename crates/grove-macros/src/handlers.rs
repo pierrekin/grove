@@ -28,6 +28,8 @@ struct DirectMethod {
     method_name: Ident,
     /// All parameters including poll args
     params: Vec<(Ident, Type)>,
+    /// Return type of the method
+    return_type: syn::ReturnType,
 }
 
 /// A parsed event handler method.
@@ -104,6 +106,7 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
                 direct_methods.push(DirectMethod {
                     method_name: method.sig.ident.clone(),
                     params: extract_all_params(&method.sig.inputs)?,
+                    return_type: method.sig.output.clone(),
                 });
                 clean_items.push(ImplItem::Fn(strip_grove_attrs(method.clone())));
             } else if let Some(source_field) = attrs.from_field {
@@ -568,6 +571,7 @@ fn generate_spawn_impl(
     let loop_body = if has_commands && has_events {
         quote! {
             tokio::select! {
+                _ = cancel_token.cancelled() => break,
                 Some(cmd) = cmd_rx.recv() => {
                     cmd.execute(&mut *state.write().unwrap());
                 }
@@ -576,19 +580,26 @@ fn generate_spawn_impl(
         }
     } else if has_commands {
         quote! {
-            if let Some(cmd) = cmd_rx.recv().await {
-                cmd.execute(&mut *state.write().unwrap());
+            tokio::select! {
+                _ = cancel_token.cancelled() => break,
+                Some(cmd) = cmd_rx.recv() => {
+                    cmd.execute(&mut *state.write().unwrap());
+                }
             }
         }
     } else if has_events {
         quote! {
             tokio::select! {
+                _ = cancel_token.cancelled() => break,
                 #(#event_select_arms)*
             }
         }
     } else {
         quote! {
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            tokio::select! {
+                _ = cancel_token.cancelled() => break,
+                _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
+            }
         }
     };
 
@@ -632,9 +643,10 @@ fn generate_spawn_simple(
                 {
                     let handle = handle.clone();
                     let cancel_token = cancel_token.child_token();
-                    tokio::spawn(async move {
+                    let task_handle = tokio::spawn(async move {
                         #struct_name::#method_name(handle, cancel_token).await;
                     });
+                    join_handles.lock().unwrap().push(task_handle);
                 }
             }
         })
@@ -651,16 +663,22 @@ fn generate_spawn_simple(
                 #(#event_receiver_setup)*
 
                 let cancel_token = self.__grove_cancel_token.clone();
+                let join_handles = self.__grove_join_handles.clone();
 
                 let state = grove::runtime::Arc::new(grove::runtime::RwLock::new(self));
                 let state_clone = state.clone();
 
-                tokio::spawn(async move {
-                    let state = state_clone;
-                    loop {
-                        #loop_body
-                    }
-                });
+                {
+                    let join_handles = join_handles.clone();
+                    let cancel_token = cancel_token.clone();
+                    let main_loop_handle = tokio::spawn(async move {
+                        let state = state_clone;
+                        loop {
+                            #loop_body
+                        }
+                    });
+                    join_handles.lock().unwrap().push(main_loop_handle);
+                }
 
                 let handle = #handle_name {
                     state,
@@ -770,9 +788,10 @@ fn generate_spawn_with_builder(
                     {
                         let handle = handle.clone();
                         let cancel_token = cancel_token.child_token();
-                        tokio::spawn(async move {
+                        let task_handle = tokio::spawn(async move {
                             #struct_name::#method_name(handle, cancel_token).await;
                         });
+                        join_handles.lock().unwrap().push(task_handle);
                     }
                 }
             } else {
@@ -789,9 +808,10 @@ fn generate_spawn_with_builder(
                     if let Some((#(#param_names,)*)) = self.#field_name {
                         let handle = handle.clone();
                         let cancel_token = cancel_token.child_token();
-                        tokio::spawn(async move {
+                        let task_handle = tokio::spawn(async move {
                             #struct_name::#method_name(handle, cancel_token, #(#param_names),*).await;
                         });
+                        join_handles.lock().unwrap().push(task_handle);
                     }
                 }
             }
@@ -808,27 +828,38 @@ fn generate_spawn_with_builder(
 
         impl #struct_name {
             /// Internal: spawns actor without tasks (used by builder)
-            fn __spawn_core(mut self) -> #handle_name {
+            fn __spawn_core(mut self) -> (#handle_name, grove::runtime::Arc<grove::runtime::Mutex<Vec<grove::runtime::JoinHandle<()>>>>) {
                 let (cmd_tx, mut cmd_rx) = grove::runtime::mpsc::channel::<#command_enum_name>(256);
 
                 self.__wire_emitter();
 
                 #(#event_receiver_setup)*
 
+                let cancel_token = self.__grove_cancel_token.clone();
+                let join_handles = self.__grove_join_handles.clone();
+
                 let state = grove::runtime::Arc::new(grove::runtime::RwLock::new(self));
                 let state_clone = state.clone();
 
-                tokio::spawn(async move {
-                    let state = state_clone;
-                    loop {
-                        #loop_body
-                    }
-                });
-
-                #handle_name {
-                    state,
-                    cmd_tx,
+                {
+                    let join_handles = join_handles.clone();
+                    let cancel_token = cancel_token.clone();
+                    let main_loop_handle = tokio::spawn(async move {
+                        let state = state_clone;
+                        loop {
+                            #loop_body
+                        }
+                    });
+                    join_handles.lock().unwrap().push(main_loop_handle);
                 }
+
+                (
+                    #handle_name {
+                        state,
+                        cmd_tx,
+                    },
+                    join_handles,
+                )
             }
 
             #(#service_spawn_methods)*
@@ -840,7 +871,7 @@ fn generate_spawn_with_builder(
             /// Spawns this service and returns a handle for interacting with it.
             pub fn spawn(self) -> #handle_name {
                 let cancel_token = self.inner.__grove_cancel_token.clone();
-                let handle = self.inner.__spawn_core();
+                let (handle, join_handles) = self.inner.__spawn_core();
 
                 #(#task_spawns)*
 
@@ -865,6 +896,7 @@ fn generate_direct_methods(
         .iter()
         .map(|method| {
             let method_name = &method.method_name;
+            let return_type = &method.return_type;
 
             let param_decls: Vec<TokenStream> = method
                 .params
@@ -876,8 +908,8 @@ fn generate_direct_methods(
 
             quote! {
                 /// Direct call to this method (caller provides all arguments).
-                pub fn #method_name(&self, #(#param_decls),*) {
-                    self.state.read().unwrap().#method_name(#(#param_names),*);
+                pub fn #method_name(&self, #(#param_decls),*) #return_type {
+                    self.state.read().unwrap().#method_name(#(#param_names),*)
                 }
             }
         })
