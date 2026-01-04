@@ -20,6 +20,7 @@ pub use grove_macros::service;
 pub mod runtime {
     pub use std::sync::{Arc, RwLock};
     pub use tokio::sync::{broadcast, mpsc};
+    pub use tokio_util::sync::CancellationToken;
 }
 
 /// Event infrastructure.

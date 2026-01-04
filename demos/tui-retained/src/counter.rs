@@ -32,12 +32,17 @@ pub struct CounterService {
 impl CounterService {
     /// Background task that increments the counter periodically
     #[grove(task)]
-    async fn tick_counter(handle: CounterServiceHandle) {
+    async fn tick_counter(
+        handle: CounterServiceHandle,
+        cancel: grove::runtime::CancellationToken,
+    ) {
         let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
 
         loop {
-            interval.tick().await;
-            handle.increment();
+            tokio::select! {
+                _ = cancel.cancelled() => break,
+                _ = interval.tick() => handle.increment(),
+            }
         }
     }
 

@@ -64,15 +64,23 @@ impl LogService {
     /// This task demonstrates task init context - it receives configuration
     /// at spawn time via `spawn_generate_logs(config)`.
     #[grove(task)]
-    async fn generate_logs(handle: LogServiceHandle, config: LogGeneratorConfig) {
+    async fn generate_logs(
+        handle: LogServiceHandle,
+        cancel: grove::runtime::CancellationToken,
+        config: LogGeneratorConfig,
+    ) {
         let mut interval = tokio::time::interval(config.interval);
         let mut idx = 0;
 
         loop {
-            interval.tick().await;
-            let (level, msg) = config.messages[idx % config.messages.len()];
-            handle.add_entry(level, msg.to_string());
-            idx += 1;
+            tokio::select! {
+                _ = cancel.cancelled() => break,
+                _ = interval.tick() => {
+                    let (level, msg) = config.messages[idx % config.messages.len()];
+                    handle.add_entry(level, msg.to_string());
+                    idx += 1;
+                }
+            }
         }
     }
 

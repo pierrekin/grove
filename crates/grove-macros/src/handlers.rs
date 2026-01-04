@@ -117,8 +117,8 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
                 clean_items.push(ImplItem::Fn(strip_grove_attrs(method.clone())));
             } else if attrs.is_task {
                 let all_params = extract_all_params(&method.sig.inputs)?;
-                // Skip first param (handle), keep the rest as extra params
-                let extra_params = all_params.into_iter().skip(1).collect();
+                // Skip first two params (handle, cancel_token), keep the rest as extra params
+                let extra_params = all_params.into_iter().skip(2).collect();
                 task_methods.push(TaskMethod {
                     method_name: method.sig.ident.clone(),
                     extra_params,
@@ -631,8 +631,9 @@ fn generate_spawn_simple(
             quote! {
                 {
                     let handle = handle.clone();
+                    let cancel_token = cancel_token.child_token();
                     tokio::spawn(async move {
-                        #struct_name::#method_name(handle).await;
+                        #struct_name::#method_name(handle, cancel_token).await;
                     });
                 }
             }
@@ -648,6 +649,8 @@ fn generate_spawn_simple(
                 self.__wire_emitter();
 
                 #(#event_receiver_setup)*
+
+                let cancel_token = self.__grove_cancel_token.clone();
 
                 let state = grove::runtime::Arc::new(grove::runtime::RwLock::new(self));
                 let state_clone = state.clone();
@@ -766,8 +769,9 @@ fn generate_spawn_with_builder(
                 quote! {
                     {
                         let handle = handle.clone();
+                        let cancel_token = cancel_token.child_token();
                         tokio::spawn(async move {
-                            #struct_name::#method_name(handle).await;
+                            #struct_name::#method_name(handle, cancel_token).await;
                         });
                     }
                 }
@@ -784,8 +788,9 @@ fn generate_spawn_with_builder(
                 quote! {
                     if let Some((#(#param_names,)*)) = self.#field_name {
                         let handle = handle.clone();
+                        let cancel_token = cancel_token.child_token();
                         tokio::spawn(async move {
-                            #struct_name::#method_name(handle, #(#param_names),*).await;
+                            #struct_name::#method_name(handle, cancel_token, #(#param_names),*).await;
                         });
                     }
                 }
@@ -834,6 +839,7 @@ fn generate_spawn_with_builder(
 
             /// Spawns this service and returns a handle for interacting with it.
             pub fn spawn(self) -> #handle_name {
+                let cancel_token = self.inner.__grove_cancel_token.clone();
                 let handle = self.inner.__spawn_core();
 
                 #(#task_spawns)*

@@ -9,3 +9,4 @@ grove-macros = { path = "../grove-macros" }
 
 # Runtime dependencies for generated code
 tokio = { version = "1", features = ["sync", "rt-multi-thread", "macros", "time"] }
+tokio-util = "0.7"

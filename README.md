@@ -144,14 +144,21 @@ impl Logger {
 Spawn long-running async tasks with your service:
 
 ```rust
+use grove::runtime::CancellationToken;
+
 #[grove::handlers]
 impl PriceService {
     #[grove(task)]
-    async fn poll_prices(handle: PriceServiceHandle) {
+    async fn poll_prices(handle: PriceServiceHandle, cancel: CancellationToken) {
+        let mut interval = tokio::time::interval(Duration::from_secs(60));
         loop {
-            let price = fetch_price().await;
-            handle.update_price(price);  // Send command to self
-            tokio::time::sleep(Duration::from_secs(60)).await;
+            tokio::select! {
+                _ = cancel.cancelled() => break,
+                _ = interval.tick() => {
+                    let price = fetch_price().await;
+                    handle.update_price(price);
+                }
+            }
         }
     }
 
@@ -162,24 +169,32 @@ impl PriceService {
 }
 ```
 
-Tasks receive a clone of the handle and run independently.
+Tasks receive:
+1. A clone of the handle
+2. A `CancellationToken` for graceful shutdown
 
-Tasks can also emit events directly via the handle, without needing a pass-through command:
+Call `handle.shutdown()` to signal all tasks to stop.
+
+Tasks can also emit events directly via the handle:
 
 ```rust
 #[grove(task)]
-async fn poll_prices(handle: PriceServiceHandle) {
+async fn poll_prices(handle: PriceServiceHandle, cancel: CancellationToken) {
     loop {
-        let price = fetch_price().await;
-        handle.emit_price_updated(PriceUpdated { price });  // Emit directly
-        tokio::time::sleep(Duration::from_secs(60)).await;
+        tokio::select! {
+            _ = cancel.cancelled() => break,
+            _ = tokio::time::sleep(Duration::from_secs(60)) => {
+                let price = fetch_price().await;
+                handle.emit_price_updated(PriceUpdated { price });
+            }
+        }
     }
 }
 ```
 
 ### Task Init Context
 
-Tasks can receive additional parameters beyond the handle. These are passed at spawn time via generated builder methods:
+Tasks can receive additional parameters beyond handle and cancel token. These are passed at spawn time via generated builder methods:
 
 ```rust
 pub struct PollConfig {
@@ -190,12 +205,20 @@ pub struct PollConfig {
 #[grove::handlers]
 impl PriceService {
     #[grove(task)]
-    async fn poll_prices(handle: PriceServiceHandle, config: PollConfig) {
+    async fn poll_prices(
+        handle: PriceServiceHandle,
+        cancel: CancellationToken,
+        config: PollConfig,
+    ) {
         let mut interval = tokio::time::interval(config.interval);
         loop {
-            interval.tick().await;
-            let price = fetch_price(&config.endpoint).await;
-            handle.update_price(price);
+            tokio::select! {
+                _ = cancel.cancelled() => break,
+                _ = interval.tick() => {
+                    let price = fetch_price(&config.endpoint).await;
+                    handle.update_price(price);
+                }
+            }
         }
     }
 }
@@ -295,6 +318,8 @@ Every service generates a `{Service}Handle` with:
 | `handle.direct_method(args)` | Call a `#[grove(direct)]` method (sync, read access)  |
 | `handle.poll(args)`          | Execute queued poll work                              |
 | `handle.has_queued_work()`   | Check for pending poll work                           |
+| `handle.shutdown()`          | Signal all tasks to stop via cancellation token       |
+| `handle.cancel_token()`      | Get the cancellation token for manual use             |
 
 ## Attribute Reference
 
@@ -320,7 +345,7 @@ Every service generates a `{Service}Handle` with:
 | `#[grove(command, poll)]`  | Command that queues work for `poll()`                         |
 | `#[grove(direct)]`         | Direct read-only method exposed on handle                     |
 | `#[grove(from = field)]`   | Event handler subscribing to another service                  |
-| `#[grove(task)]`           | Background async task; extra params become spawn-time context |
+| `#[grove(task)]`           | Background async task; receives `(handle, cancel_token, ...extra_params)` |
 
 ## Demos
 

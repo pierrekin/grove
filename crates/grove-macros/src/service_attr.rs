@@ -71,6 +71,9 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
     }
     let has_poll = poll_signature.is_some();
 
+    // Always inject cancellation token for graceful shutdown
+    inject_cancel_token_field(fields);
+
     // Generate code
     let handle_struct = generate_handle_struct(struct_name, &handle_name, &command_type);
     let getter_impls = generate_getters(&handle_name, &getters);
@@ -78,6 +81,7 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
     let emit_methods = generate_emit_methods(struct_name, &emitted_events);
     let constructor = generate_constructor(struct_name, &user_fields, has_emitter, has_poll);
     let poll_method = generate_poll_method(struct_name, &handle_name, poll_signature.as_ref());
+    let shutdown_method = generate_shutdown_method(&handle_name);
 
     // Remove grove attributes from struct (they've been processed)
     input.attrs.retain(|attr| !attr.path().is_ident("grove"));
@@ -99,6 +103,7 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
         #emit_methods
         #constructor
         #poll_method
+        #shutdown_method
     })
 }
 
@@ -164,6 +169,15 @@ fn inject_emitter_field(fields: &mut FieldsNamed) {
     fields.named.push(emitter_field);
 }
 
+/// Inject a hidden cancellation token field into the struct.
+fn inject_cancel_token_field(fields: &mut FieldsNamed) {
+    let cancel_field: syn::Field = syn::parse_quote! {
+        #[doc(hidden)]
+        pub __grove_cancel_token: grove::runtime::CancellationToken
+    };
+    fields.named.push(cancel_field);
+}
+
 /// Inject a hidden main thread queue field into the struct.
 fn inject_queue_field(fields: &mut FieldsNamed, struct_name: &Ident, poll_types: &[Type]) {
     let queue_field: syn::Field = syn::parse_quote! {
@@ -189,8 +203,8 @@ impl GetterField {
             .clone()
             .expect("we already verified these are named fields");
 
-        // Skip the injected emitter field
-        if name == "__grove_emitter" {
+        // Skip injected grove fields
+        if name == "__grove_emitter" || name == "__grove_cancel_token" {
             return Ok(None);
         }
 
@@ -343,6 +357,7 @@ fn generate_constructor(
                     #(#field_inits,)*
                     #emitter_init
                     #queue_init
+                    __grove_cancel_token: grove::runtime::CancellationToken::new(),
                 }
             }
         }
@@ -413,6 +428,29 @@ fn to_snake_case(s: &str) -> String {
         }
     }
     result
+}
+
+/// Generate shutdown() and cancel_token() methods on the handle.
+fn generate_shutdown_method(handle_name: &Ident) -> TokenStream {
+    quote! {
+        impl #handle_name {
+            /// Returns the cancellation token for this service.
+            ///
+            /// Tasks can use this to check for cancellation or wait on `token.cancelled()`.
+            pub fn cancel_token(&self) -> grove::runtime::CancellationToken {
+                self.state.read().unwrap().__grove_cancel_token.clone()
+            }
+
+            /// Signals all tasks to shut down gracefully.
+            ///
+            /// This cancels the service's cancellation token. Tasks should check
+            /// for cancellation in their loops using `tokio::select!` with
+            /// `token.cancelled()`.
+            pub fn shutdown(&self) {
+                self.state.read().unwrap().__grove_cancel_token.cancel();
+            }
+        }
+    }
 }
 
 /// Generate the poll() method on the handle.

@@ -68,7 +68,10 @@ impl MessageGenerator {
     /// Background task that emits events directly via the handle.
     /// No pass-through command needed - tasks can emit via handle.emit_*()
     #[grove(task)]
-    async fn generate(handle: MessageGeneratorHandle) {
+    async fn generate(
+        handle: MessageGeneratorHandle,
+        _cancel: grove::runtime::CancellationToken,
+    ) {
         let messages = ["Ping!", "Background task running", "Still here"];
         for msg in messages {
             tokio::time::sleep(Duration::from_millis(30)).await;
