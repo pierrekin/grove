@@ -78,6 +78,7 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
     // Parse all methods
     let mut command_methods: Vec<CommandMethod> = Vec::new();
     let mut direct_methods: Vec<DirectMethod> = Vec::new();
+    let mut direct_mut_methods: Vec<DirectMethod> = Vec::new();
     let mut event_handlers: Vec<EventHandler> = Vec::new();
     let mut task_methods: Vec<TaskMethod> = Vec::new();
     let mut clean_items: Vec<ImplItem> = Vec::new();
@@ -104,6 +105,13 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
                 clean_items.push(ImplItem::Fn(strip_grove_attrs(method.clone())));
             } else if attrs.is_direct {
                 direct_methods.push(DirectMethod {
+                    method_name: method.sig.ident.clone(),
+                    params: extract_all_params(&method.sig.inputs)?,
+                    return_type: method.sig.output.clone(),
+                });
+                clean_items.push(ImplItem::Fn(strip_grove_attrs(method.clone())));
+            } else if attrs.is_direct_mut {
+                direct_mut_methods.push(DirectMethod {
                     method_name: method.sig.ident.clone(),
                     params: extract_all_params(&method.sig.inputs)?,
                     return_type: method.sig.output.clone(),
@@ -156,6 +164,7 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
 
     // Generate direct method wrappers on handle
     let direct_impl = generate_direct_methods(&struct_name, &handle_name, &direct_methods);
+    let direct_mut_impl = generate_direct_mut_methods(&struct_name, &handle_name, &direct_mut_methods);
 
     // Reconstruct the impl block
     let impl_generics = &impl_block.generics;
@@ -175,6 +184,7 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
         #spawn_impl
         #service_queue_impl
         #direct_impl
+        #direct_mut_impl
     })
 }
 
@@ -187,6 +197,7 @@ struct MethodAttrs {
     is_command: bool,
     is_poll: bool,
     is_direct: bool,
+    is_direct_mut: bool,
     is_task: bool,
     from_field: Option<Ident>,
 }
@@ -196,6 +207,7 @@ fn parse_method_attrs(method: &ImplItemFn) -> Result<MethodAttrs> {
         is_command: false,
         is_poll: false,
         is_direct: false,
+        is_direct_mut: false,
         is_task: false,
         from_field: None,
     };
@@ -212,6 +224,8 @@ fn parse_method_attrs(method: &ImplItemFn) -> Result<MethodAttrs> {
                 attrs.is_poll = true;
             } else if meta.path.is_ident("direct") {
                 attrs.is_direct = true;
+            } else if meta.path.is_ident("direct_mut") {
+                attrs.is_direct_mut = true;
             } else if meta.path.is_ident("task") {
                 attrs.is_task = true;
             } else if meta.path.is_ident("from") {
@@ -910,6 +924,47 @@ fn generate_direct_methods(
                 /// Direct call to this method (caller provides all arguments).
                 pub fn #method_name(&self, #(#param_decls),*) #return_type {
                     self.state.read().unwrap().#method_name(#(#param_names),*)
+                }
+            }
+        })
+        .collect();
+
+    quote! {
+        impl #handle_name {
+            #(#handle_methods)*
+        }
+    }
+}
+
+/// Generate direct_mut method wrappers on the handle.
+/// These forward calls with a write lock for mutable access.
+fn generate_direct_mut_methods(
+    _struct_name: &Ident,
+    handle_name: &Ident,
+    methods: &[DirectMethod],
+) -> TokenStream {
+    if methods.is_empty() {
+        return quote! {};
+    }
+
+    let handle_methods: Vec<TokenStream> = methods
+        .iter()
+        .map(|method| {
+            let method_name = &method.method_name;
+            let return_type = &method.return_type;
+
+            let param_decls: Vec<TokenStream> = method
+                .params
+                .iter()
+                .map(|(name, ty)| quote! { #name: #ty })
+                .collect();
+
+            let param_names: Vec<&Ident> = method.params.iter().map(|(name, _)| name).collect();
+
+            quote! {
+                /// Direct call to this method with write lock (caller provides all arguments).
+                pub fn #method_name(&self, #(#param_decls),*) #return_type {
+                    self.state.write().unwrap().#method_name(#(#param_names),*)
                 }
             }
         })
