@@ -306,8 +306,10 @@ fn generate_subscription_methods(handle_name: &Ident, emitted_events: &[Ident]) 
 
             quote! {
                 /// Subscribe to this event type.
-                pub fn #method_name(&self) -> grove::runtime::broadcast::Receiver<#event> {
-                    self.state.read().unwrap().__grove_emitter.subscribe::<#event>()
+                pub fn #method_name(&self) -> grove::event::EventReceiver<#event> {
+                    grove::event::EventReceiver::new(
+                        self.state.read().unwrap().__grove_emitter.subscribe::<#event>()
+                    )
                 }
             }
         })

@@ -559,7 +559,7 @@ fn generate_spawn_impl(
             let rx_name = format_ident!("{}_rx", handler_method);
             let subscription_method = derive_subscription_method(&handler.event_type);
             quote! {
-                let mut #rx_name = self.#field.#subscription_method();
+                let mut #rx_name = self.#field.#subscription_method().into_inner();
             }
         })
         .collect();

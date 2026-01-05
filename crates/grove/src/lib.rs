@@ -15,6 +15,9 @@ pub use grove_macros::Service;
 pub use grove_macros::handlers;
 pub use grove_macros::service;
 
+// Re-export event types
+pub use event::EventReceiver;
+
 // Re-export runtime dependencies that generated code needs.
 #[doc(hidden)]
 pub mod runtime {
@@ -172,6 +175,39 @@ pub mod event {
     ///
     /// Implemented automatically by `#[derive(Event)]`.
     pub trait Event: Clone + Send + 'static {}
+
+    /// A receiver for events from a Grove service.
+    ///
+    /// Wraps a broadcast channel receiver with a simpler API for external consumers.
+    pub struct EventReceiver<T>(broadcast::Receiver<T>);
+
+    impl<T: Clone> EventReceiver<T> {
+        /// Creates a new EventReceiver from a broadcast receiver.
+        pub fn new(rx: broadcast::Receiver<T>) -> Self {
+            Self(rx)
+        }
+
+        /// Non-blocking receive. Returns `Some(event)` if available, `None` otherwise.
+        ///
+        /// Use this in render loops or anywhere you want to poll without blocking.
+        pub fn try_recv(&mut self) -> Option<T> {
+            self.0.try_recv().ok()
+        }
+
+        /// Blocking receive. Waits until an event is available or the channel closes.
+        ///
+        /// Returns `None` if the channel is closed.
+        pub fn recv(&mut self) -> Option<T> {
+            let rt = tokio::runtime::Handle::current();
+            rt.block_on(async { self.0.recv().await.ok() })
+        }
+
+        /// Returns the inner broadcast receiver.
+        #[doc(hidden)]
+        pub fn into_inner(self) -> broadcast::Receiver<T> {
+            self.0
+        }
+    }
 
     /// Emitter for sending events to subscribers.
     ///
