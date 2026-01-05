@@ -180,6 +180,8 @@ let completion = handle.cancel_tasks();
 completion.wait()?;  // blocks until all tasks finish
 ```
 
+On shutdown, any commands still queued in the channel are drained and executed before the service task exits. This ensures graceful shutdown without losing pending work.
+
 Tasks can also emit events directly via the handle:
 
 ```rust
@@ -268,6 +270,15 @@ loop {
 }
 ```
 
+For methods that need mutable access (e.g., during shutdown), use `#[grove(direct_mut)]`:
+
+```rust
+#[grove(direct_mut)]
+fn shutdown(&mut self) {
+    self.cleanup();  // Synchronous write access
+}
+```
+
 ### Retained Mode (reactive updates)
 
 For UIs that only update on changes, use `#[grove(command, poll)]`:
@@ -321,6 +332,7 @@ Every service generates a `{Service}Handle` with:
 | `handle.on_event()`          | Subscribe to an event (returns `broadcast::Receiver`) |
 | `handle.emit_event(e)`       | Emit an event (useful from tasks)                     |
 | `handle.direct_method(args)` | Call a `#[grove(direct)]` method (sync, read access)  |
+| `handle.direct_mut_method(args)` | Call a `#[grove(direct_mut)]` method (sync, write access) |
 | `handle.poll(args)`          | Execute queued poll work                              |
 | `handle.has_queued_work()`   | Check for pending poll work                           |
 | `handle.cancel_tasks()`      | Signal tasks to stop, returns `TaskCompletion`        |
@@ -350,6 +362,7 @@ Every service generates a `{Service}Handle` with:
 | `#[grove(command)]`        | Async command handler with `&mut self`                        |
 | `#[grove(command, poll)]`  | Command that queues work for `poll()`                         |
 | `#[grove(direct)]`         | Direct read-only method exposed on handle                     |
+| `#[grove(direct_mut)]`     | Direct mutable method exposed on handle (acquires write lock) |
 | `#[grove(from = field)]`   | Event handler subscribing to another service                  |
 | `#[grove(task)]`           | Background async task; receives `(handle, cancel_token, ...extra_params)` |
 

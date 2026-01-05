@@ -585,7 +585,13 @@ fn generate_spawn_impl(
     let loop_body = if has_commands && has_events {
         quote! {
             tokio::select! {
-                _ = cancel_token.cancelled() => break,
+                _ = cancel_token.cancelled() => {
+                    // Drain remaining commands before exit
+                    while let Ok(cmd) = cmd_rx.try_recv() {
+                        cmd.execute(&mut *state.write().unwrap());
+                    }
+                    break;
+                }
                 Some(cmd) = cmd_rx.recv() => {
                     cmd.execute(&mut *state.write().unwrap());
                 }
@@ -595,7 +601,13 @@ fn generate_spawn_impl(
     } else if has_commands {
         quote! {
             tokio::select! {
-                _ = cancel_token.cancelled() => break,
+                _ = cancel_token.cancelled() => {
+                    // Drain remaining commands before exit
+                    while let Ok(cmd) = cmd_rx.try_recv() {
+                        cmd.execute(&mut *state.write().unwrap());
+                    }
+                    break;
+                }
                 Some(cmd) = cmd_rx.recv() => {
                     cmd.execute(&mut *state.write().unwrap());
                 }
