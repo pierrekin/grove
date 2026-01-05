@@ -107,8 +107,8 @@ pub mod runtime {
         ///
         /// ```ignore
         /// let completion = TaskCompletion::join([
-        ///     child_handle.cancel_tasks(),
-        ///     self.cancel_tasks(),
+        ///     child_handle.cancel(),
+        ///     self.cancel(),
         /// ]);
         /// completion.wait()?;
         /// ```

@@ -30,8 +30,8 @@ fn main() -> anyhow::Result<()> {
     disable_raw_mode()?;
     stdout().execute(LeaveAlternateScreen)?;
 
-    // Clean shutdown: cancel tasks and wait for completion
-    counter.cancel_tasks().wait()?;
+    // Clean shutdown: cancel service and wait for completion
+    counter.cancel().wait()?;
 
     result
 }

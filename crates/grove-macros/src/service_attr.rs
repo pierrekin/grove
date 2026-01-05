@@ -377,14 +377,15 @@ fn generate_constructor(
                 }
             }
 
-            /// Signals all tasks to cancel gracefully and returns a completion handle.
+            /// Cancels the service and all its background tasks.
             ///
-            /// This cancels the service's cancellation token. Tasks should check
+            /// This cancels the service's cancellation token, which stops the main
+            /// event loop and signals background tasks to stop. Tasks should check
             /// for cancellation in their loops using `tokio::select!` with
             /// `token.cancelled()`.
             ///
             /// Use the returned `TaskCompletion` to wait for tasks to finish.
-            pub fn cancel_tasks(&self) -> grove::runtime::TaskCompletion {
+            pub fn cancel(&self) -> grove::runtime::TaskCompletion {
                 self.__grove_cancel_token.cancel();
                 grove::runtime::TaskCompletion::new(self.__grove_join_handles.clone())
             }
@@ -458,7 +459,7 @@ fn to_snake_case(s: &str) -> String {
     result
 }
 
-/// Generate cancel_tasks(), task_completion(), and cancel_token() methods on the handle.
+/// Generate cancel(), task_completion(), and cancel_token() methods on the handle.
 fn generate_shutdown_method(handle_name: &Ident) -> TokenStream {
     quote! {
         impl #handle_name {
@@ -469,14 +470,15 @@ fn generate_shutdown_method(handle_name: &Ident) -> TokenStream {
                 self.state.read().unwrap().__grove_cancel_token.clone()
             }
 
-            /// Signals all tasks to cancel gracefully and returns a completion handle.
+            /// Cancels the service and all its background tasks.
             ///
-            /// This cancels the service's cancellation token. Tasks should check
+            /// This cancels the service's cancellation token, which stops the main
+            /// event loop and signals background tasks to stop. Tasks should check
             /// for cancellation in their loops using `tokio::select!` with
             /// `token.cancelled()`.
             ///
             /// Use the returned `TaskCompletion` to wait for tasks to finish.
-            pub fn cancel_tasks(&self) -> grove::runtime::TaskCompletion {
+            pub fn cancel(&self) -> grove::runtime::TaskCompletion {
                 self.state.read().unwrap().__grove_cancel_token.cancel();
                 self.task_completion()
             }

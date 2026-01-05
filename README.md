@@ -110,6 +110,8 @@ pub struct MessageSent {
 }
 ```
 
+Events must implement `Clone + Send + 'static`. Event channels have a fixed capacity of 256 messages.
+
 Emit events from commands:
 
 ```rust
@@ -173,14 +175,39 @@ Tasks receive:
 1. A clone of the handle
 2. A `CancellationToken` for graceful shutdown
 
-Call `handle.cancel_tasks()` to signal all tasks to stop and wait for completion:
+Call `handle.cancel()` to cancel the service and wait for completion:
 
 ```rust
-let completion = handle.cancel_tasks();
-completion.wait()?;  // blocks until all tasks finish
+let completion = handle.cancel();
+completion.wait()?;  // blocks until service and all tasks finish
 ```
 
 On shutdown, any commands still queued in the channel are drained and executed before the service task exits. This ensures graceful shutdown without losing pending work.
+
+### TaskCompletion
+
+The `TaskCompletion` handle returned by `cancel()` provides several methods:
+
+```rust
+// Block until complete
+completion.wait()?;
+
+// Block with timeout
+use std::time::Duration;
+completion.wait_timeout(Duration::from_secs(5))?;
+
+// Non-blocking check
+if completion.is_complete() {
+    println!("All tasks finished");
+}
+
+// Combine multiple services
+let completion = TaskCompletion::join([
+    service_a.cancel(),
+    service_b.cancel(),
+]);
+completion.wait()?;
+```
 
 Tasks can also emit events directly via the handle:
 
@@ -335,7 +362,7 @@ Every service generates a `{Service}Handle` with:
 | `handle.direct_mut_method(args)` | Call a `#[grove(direct_mut)]` method (sync, write access) |
 | `handle.poll(args)`          | Execute queued poll work                              |
 | `handle.has_queued_work()`   | Check for pending poll work                           |
-| `handle.cancel_tasks()`      | Signal tasks to stop, returns `TaskCompletion`        |
+| `handle.cancel()`            | Cancel service and tasks, returns `TaskCompletion`    |
 | `handle.task_completion()`   | Get `TaskCompletion` for waiting on tasks             |
 | `handle.cancel_token()`      | Get the cancellation token for manual use             |
 
