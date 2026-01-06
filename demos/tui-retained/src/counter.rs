@@ -23,7 +23,10 @@ static RENDER_COUNT: AtomicU32 = AtomicU32::new(0);
 #[grove::service]
 #[grove(poll(&mut Frame))]
 pub struct CounterService {
+    #[grove(default)]
     count: u32,
+
+    #[grove(default = 20)]
     max_count: u32,
 }
 

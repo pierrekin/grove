@@ -7,7 +7,7 @@ use eframe::egui;
 
 #[grove::service]
 pub struct Status {
-    #[grove(get)]
+    #[grove(get, default = String::from("Ready"))]
     message: String,
 
     counter: CounterHandle,

@@ -24,7 +24,7 @@ pub struct CounterChanged {
 #[grove::service]
 #[grove(emits = [CounterChanged])]
 pub struct Counter {
-    #[grove(get)]
+    #[grove(get, default)]
     value: usize,
 }
 
@@ -39,7 +39,7 @@ impl Counter {
 
 #[tokio::main]
 async fn main() {
-    let counter = Counter::new(0).spawn();
+    let counter = Counter::new().spawn();
 
     // Send commands (async, serialized)
     counter.increment();
@@ -63,16 +63,19 @@ Use `#[grove::service]` on a struct to define a service:
 #[grove::service]
 #[grove(emits = [Event1, Event2])]  // Optional: declare emitted events
 pub struct MyService {
-    #[grove(get)]  // Expose getter on handle
-    public_field: String,
+    #[grove(get, default)]  // Getter on handle + default init
+    public_field: Vec<String>,
 
-    private_field: i32,  // Internal only
+    #[grove(default = 100)]  // Custom default value
+    max_items: usize,
+
+    dependency: OtherServiceHandle,  // Required field (no default)
 }
 ```
 
 This generates:
 - `MyServiceHandle` - cloneable handle for interacting with the service
-- `MyService::new(...)` - constructor taking all fields
+- `MyService::new(dependency)` - constructor taking only non-defaulted fields
 - `handle.public_field()` - getter for fields marked with `#[grove(get)]`
 - `handle.on_event1()` - subscription methods for declared events
 - `self.emit_event1(...)` - emit methods on the service (for commands)
@@ -258,7 +261,7 @@ impl PriceService {
 }
 
 // Spawn with config
-let service = PriceService::new(0.0)
+let service = PriceService::new()
     .spawn_poll_prices(PollConfig {
         interval: Duration::from_secs(60),
         endpoint: "https://api.example.com".into(),
@@ -314,6 +317,7 @@ For UIs that only update on changes, use `#[grove(command, poll)]`:
 #[grove::service]
 #[grove(poll(&mut Frame))]  // Declare poll signature
 pub struct Counter {
+    #[grove(default)]
     value: u32,
 }
 
@@ -378,9 +382,13 @@ Every service generates a `{Service}Handle` with:
 
 ### Field Attributes
 
-| Attribute       | Description                                       |
-|-----------------|---------------------------------------------------|
-| `#[grove(get)]` | Generate getter on handle (field must be `Clone`) |
+| Attribute                   | Description                                                |
+|-----------------------------|-----------------------------------------------------------|
+| `#[grove(get)]`             | Generate getter on handle (field must be `Clone`)          |
+| `#[grove(default)]`         | Exclude from `new()`, init with `Default::default()`       |
+| `#[grove(default = <expr>)]`| Exclude from `new()`, init with the given expression       |
+
+Field attributes can be combined: `#[grove(get, default)]`
 
 ### Method Attributes
 

@@ -14,7 +14,7 @@ fn main() -> anyhow::Result<()> {
     let _guard = rt.enter();
 
     // Start the counter service
-    let counter = CounterService::new(0, 20).spawn();
+    let counter = CounterService::new().spawn();
 
     // Trigger initial render (sends command which queues for poll)
     counter.render();

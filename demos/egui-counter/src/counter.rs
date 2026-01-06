@@ -17,7 +17,7 @@ pub struct CounterIncremented {
 #[grove::service]
 #[grove(emits = [CounterIncremented])]
 pub struct Counter {
-    #[grove(get)]
+    #[grove(get, default)]
     value: usize,
 }
 

@@ -19,7 +19,7 @@ struct Notification {
 
 #[grove::service]
 struct NotificationService {
-    #[grove(get)]
+    #[grove(get, default)]
     sent_count: usize,
 }
 
@@ -44,7 +44,7 @@ struct Message {
 
 #[grove::service]
 struct Chat {
-    #[grove(get)]
+    #[grove(get, default)]
     messages: Vec<Message>,
 
     notifications: NotificationServiceHandle,
@@ -71,10 +71,10 @@ impl Chat {
 #[tokio::main]
 async fn main() {
     // Spawn leaf services first (no dependencies)
-    let notifications = NotificationService::new(0).spawn();
+    let notifications = NotificationService::new().spawn();
 
     // Spawn dependent services, injecting handles
-    let chat = Chat::new(vec![], notifications.clone()).spawn();
+    let chat = Chat::new(notifications.clone()).spawn();
 
     // Use the generated sender methods
     chat.send(Message {

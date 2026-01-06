@@ -98,9 +98,18 @@ pub fn handlers(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// This is the preferred way to define services. It automatically:
 /// - Injects an emitter field for services that emit events
 /// - Generates the handle struct
+/// - Generates a `new()` constructor (fields with `#[grove(default)]` are excluded)
 /// - Generates getter methods for `#[grove(get)]` fields
 /// - Generates `emit_<event>()` methods for each declared event
 /// - Generates subscription methods on the handle
+///
+/// # Field Attributes
+///
+/// - `#[grove(get)]` - Generates a getter method on the handle that clones the field
+/// - `#[grove(default)]` - Excludes field from `new()`, initializes with `Default::default()`
+/// - `#[grove(default = <expr>)]` - Excludes field from `new()`, initializes with the expression
+///
+/// Field attributes can be combined: `#[grove(get, default)]`
 ///
 /// # Example
 ///
@@ -108,8 +117,11 @@ pub fn handlers(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// #[grove::service]
 /// #[grove(emits = [MessageSent])]
 /// struct Chat {
-///     #[grove(get)]
+///     #[grove(get, default)]
 ///     messages: Vec<Message>,
+///
+///     #[grove(default = 100)]
+///     max_messages: usize,
 /// }
 ///
 /// #[grove::handlers]
@@ -120,6 +132,9 @@ pub fn handlers(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///         self.messages.push(msg);
 ///     }
 /// }
+///
+/// // Usage: Chat::new() - no arguments needed!
+/// let chat = Chat::new().spawn();
 /// ```
 #[proc_macro_attribute]
 pub fn service(attr: TokenStream, item: TokenStream) -> TokenStream {

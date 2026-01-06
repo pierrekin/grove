@@ -33,7 +33,7 @@ struct Message {
 #[grove::service]
 #[grove(emits = [MessageSent])]
 struct Chat {
-    #[grove(get)]
+    #[grove(get, default)]
     messages: Vec<Message>,
     // No emitter field needed - injected automatically!
 }
@@ -90,7 +90,7 @@ impl MessageGenerator {
 
 #[grove::service]
 struct Analytics {
-    #[grove(get)]
+    #[grove(get, default)]
     message_count: usize,
 
     chat: ChatHandle,
@@ -124,13 +124,13 @@ impl Analytics {
 #[tokio::main]
 async fn main() {
     // Spawn Chat - emits events from commands
-    let chat = Chat::new(vec![]).spawn();
+    let chat = Chat::new().spawn();
 
     // Spawn MessageGenerator - emits events directly from a task
     let generator = MessageGenerator::new().spawn();
 
     // Spawn Analytics, subscribing to events from both services
-    let analytics = Analytics::new(0, chat.clone(), generator.clone()).spawn();
+    let analytics = Analytics::new(chat.clone(), generator.clone()).spawn();
 
     // Send some messages via command
     chat.send(Message {

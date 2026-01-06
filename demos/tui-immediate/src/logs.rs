@@ -17,7 +17,10 @@ use std::time::{Duration, Instant};
 
 #[grove::service]
 pub struct LogService {
+    #[grove(default)]
     entries: Vec<LogEntry>,
+
+    #[grove(default = Instant::now())]
     start_time: Instant,
 }
 

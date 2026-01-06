@@ -10,8 +10,8 @@ fn main() -> eframe::Result<()> {
     let _guard = rt.enter();
 
     // Wire up services
-    let counter = Counter::new(0).spawn();
-    let status: StatusHandle = Status::new("Ready".to_string(), counter.clone()).spawn();
+    let counter = Counter::new().spawn();
+    let status: StatusHandle = Status::new(counter.clone()).spawn();
 
     eframe::run_native(
         "Grove + egui",

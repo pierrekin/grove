@@ -9,8 +9,8 @@
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::{
-    parse::Parser, parse2, Data, DeriveInput, Error, Field, Fields, FieldsNamed, Ident, Result,
-    Type,
+    parse::Parser, parse2, Data, DeriveInput, Error, Expr, Field, Fields, FieldsNamed, Ident,
+    Result, Type,
 };
 
 /// Main entry point for the service attribute macro.
@@ -52,6 +52,13 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
         .filter_map(|f| GetterField::from_field(f).transpose())
         .collect::<Result<_>>()?;
 
+    // Parse field attributes for defaults BEFORE injecting emitter
+    let defaults: Vec<DefaultField> = fields
+        .named
+        .iter()
+        .filter_map(|f| DefaultField::from_field(f).transpose())
+        .collect::<Result<_>>()?;
+
     // Collect all user-declared fields BEFORE injecting emitter
     let user_fields: Vec<_> = fields
         .named
@@ -82,7 +89,7 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
     let getter_impls = generate_getters(&handle_name, &getters);
     let subscription_methods = generate_subscription_methods(&handle_name, &emitted_events);
     let emit_methods = generate_emit_methods(struct_name, &emitted_events);
-    let constructor = generate_constructor(struct_name, &user_fields, has_emitter, has_poll);
+    let constructor = generate_constructor(struct_name, &user_fields, &defaults, has_emitter, has_poll);
     let poll_method = generate_poll_method(struct_name, &handle_name, poll_signature.as_ref());
     let shutdown_method = generate_shutdown_method(&handle_name);
 
@@ -233,7 +240,15 @@ impl GetterField {
             attr.parse_nested_meta(|meta| {
                 if meta.path.is_ident("get") {
                     is_getter = true;
+                } else if meta.input.peek(syn::Token![=]) {
+                    // Skip over unknown metas with = value
+                    let _: syn::Expr = meta.value()?.parse()?;
+                } else if meta.input.peek(syn::token::Paren) {
+                    // Skip over unknown metas with (...)
+                    let _content;
+                    syn::parenthesized!(_content in meta.input);
                 }
+                // Otherwise it's just a path like #[grove(something)], which is fine
                 Ok(())
             })?;
 
@@ -241,6 +256,60 @@ impl GetterField {
                 return Ok(Some(Self {
                     name,
                     ty: field.ty.clone(),
+                }));
+            }
+        }
+
+        Ok(None)
+    }
+}
+
+struct DefaultField {
+    name: Ident,
+    #[allow(dead_code)]
+    ty: Type,
+    default_expr: Option<Expr>,
+}
+
+impl DefaultField {
+    fn from_field(field: &Field) -> Result<Option<Self>> {
+        let name = field
+            .ident
+            .clone()
+            .expect("we already verified these are named fields");
+
+        // Skip injected grove fields
+        if name.to_string().starts_with("__grove_") {
+            return Ok(None);
+        }
+
+        for attr in &field.attrs {
+            if !attr.path().is_ident("grove") {
+                continue;
+            }
+
+            let mut default_expr: Option<Option<Expr>> = None;
+
+            attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("default") {
+                    if meta.input.peek(syn::Token![=]) {
+                        // Parse default = expr using meta.value()
+                        let value = meta.value()?;
+                        let expr: Expr = value.parse()?;
+                        default_expr = Some(Some(expr));
+                    } else {
+                        // Just #[grove(default)] - use Default::default()
+                        default_expr = Some(None);
+                    }
+                }
+                Ok(())
+            })?;
+
+            if let Some(expr) = default_expr {
+                return Ok(Some(Self {
+                    name,
+                    ty: field.ty.clone(),
+                    default_expr: expr,
                 }));
             }
         }
@@ -341,17 +410,32 @@ fn generate_subscription_methods(handle_name: &Ident, emitted_events: &[Ident]) 
 fn generate_constructor(
     struct_name: &Ident,
     user_fields: &[(Ident, Type)],
+    defaults: &[DefaultField],
     has_emitter: bool,
     has_poll: bool,
 ) -> TokenStream {
+    let default_names: std::collections::HashSet<_> = defaults.iter().map(|d| &d.name).collect();
+
+    // Only non-defaulted fields become parameters
     let params: Vec<TokenStream> = user_fields
         .iter()
+        .filter(|(name, _)| !default_names.contains(name))
         .map(|(name, ty)| quote! { #name: #ty })
         .collect();
 
+    // All fields need initializers
     let field_inits: Vec<TokenStream> = user_fields
         .iter()
-        .map(|(name, _)| quote! { #name })
+        .map(|(name, _)| {
+            if let Some(default) = defaults.iter().find(|d| &d.name == name) {
+                match &default.default_expr {
+                    Some(expr) => quote! { #name: #expr },
+                    None => quote! { #name: Default::default() },
+                }
+            } else {
+                quote! { #name }
+            }
+        })
         .collect();
 
     let emitter_init = if has_emitter {

@@ -8,7 +8,6 @@ use crossterm::{
 use logs::{LogGeneratorConfig, LogService, LogServiceHandle};
 use ratatui::prelude::*;
 use std::io::stdout;
-use std::time::Instant;
 
 fn main() -> anyhow::Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
@@ -16,7 +15,7 @@ fn main() -> anyhow::Result<()> {
 
     // Start the log service with task init context
     // The generate_logs task receives its config via spawn_generate_logs()
-    let logs = LogService::new(vec![], Instant::now())
+    let logs = LogService::new()
         .spawn_generate_logs(LogGeneratorConfig::default())
         .spawn();
 
