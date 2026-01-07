@@ -369,6 +369,80 @@ Every service generates a `{Service}Handle` with:
 | `handle.cancel()`            | Cancel service and tasks, returns `TaskCompletion`    |
 | `handle.task_completion()`   | Get `TaskCompletion` for waiting on tasks             |
 | `handle.cancel_token()`      | Get the cancellation token for manual use             |
+| `handle.command_stats()`     | Iterator of per-command metrics                       |
+| `handle.aggregate_stats()`   | Aggregate metrics with historical sampling            |
+| `handle.<event>_published()` | Count of events published (for emitting services)     |
+| `handle.<event>_subscriber_count()` | Current subscriber count for event type        |
+
+## Metrics
+
+Grove automatically collects channel metrics for observability. No configuration required.
+
+### Command Channel Metrics
+
+Every service tracks per-command statistics:
+
+```rust
+// Per-command breakdown
+for stat in handle.command_stats() {
+    println!("{}: depth={}, enqueued={}, processed={}",
+        stat.name,
+        stat.depth,           // Current queue depth
+        stat.total_enqueued,  // Total commands sent
+        stat.total_processed  // Total commands processed
+    );
+}
+
+// Aggregate statistics with historical sampling
+let agg = handle.aggregate_stats();
+println!("Current depth: {}", agg.depth);
+println!("Mean depth (1s): {:.2}", agg.mean_depth_1s);
+println!("Max depth (1m): {}", agg.max_depth_1m);
+```
+
+| Field | Description |
+|-------|-------------|
+| `depth` | Current queue depth (exact) |
+| `total_enqueued` | Total commands sent |
+| `total_processed` | Total commands processed |
+| `mean_depth_1s/10s/1m` | Average depth over time window |
+| `max_depth_1s/10s/1m` | Maximum depth over time window |
+| `throughput_1s` | Approximate commands/sec |
+
+Sampling occurs every 100 commands or 100ms (whichever comes first), with 1 minute of history retained.
+
+### Event Metrics
+
+For services that emit events, Grove tracks publisher-side statistics:
+
+```rust
+// Publisher stats (per event type)
+let published = handle.my_event_published();      // Total events emitted
+let subscribers = handle.my_event_subscriber_count();  // Current subscriber count
+```
+
+For event subscribers, check receiver queue depth:
+
+```rust
+let mut receiver = handle.on_my_event();
+let pending = receiver.depth();  // Events waiting to be consumed
+```
+
+| Location | Method | Description |
+|----------|--------|-------------|
+| Handle | `<event>_published()` | Total events emitted |
+| Handle | `<event>_subscriber_count()` | Current subscriber count |
+| EventReceiver | `depth()` | Pending events in this receiver |
+
+### Metrics API Summary
+
+| Method | Description |
+|--------|-------------|
+| `handle.command_stats()` | Iterator of per-command `CommandStats` |
+| `handle.aggregate_stats()` | `AggregateStats` with current + historical data |
+| `handle.<event>_published()` | Total events published for this type |
+| `handle.<event>_subscriber_count()` | Number of active subscribers |
+| `receiver.depth()` | Events pending in this subscriber's queue |
 
 ## Attribute Reference
 
@@ -413,6 +487,7 @@ For smaller examples, see `crates/grove/examples/`:
 
 - **hello_world** - Basic service, commands, and getters
 - **events** - Event emission and subscription
+- **metrics** - Channel metrics and observability APIs
 
 ## License
 

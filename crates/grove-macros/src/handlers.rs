@@ -144,13 +144,25 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
     }
 
     // Generate command infrastructure
-    let (command_enum, execute_impl, handle_sender_impl, service_queue_impl) = generate_command_infra(
+    let cmd_count = command_methods.len();
+    let (command_enum, execute_impl, handle_sender_impl, service_queue_impl, metrics_impl) = generate_command_infra(
         &struct_name,
         &command_enum_name,
         &handle_name,
         &command_methods,
         poll_signature.as_ref(),
     );
+
+    // Generate handle struct (must be in handlers.rs because we know command count for metrics)
+    let handle_struct = quote! {
+        /// Handle for interacting with the service.
+        #[derive(Clone)]
+        pub struct #handle_name {
+            state: grove::runtime::Arc<grove::runtime::RwLock<#struct_name>>,
+            cmd_tx: grove::runtime::mpsc::Sender<#command_enum_name>,
+            metrics: grove::runtime::Arc<grove::metrics::CommandMetrics<#cmd_count>>,
+        }
+    };
 
     // Generate spawn implementation
     let spawn_impl = generate_spawn_impl(
@@ -179,12 +191,14 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
     Ok(quote! {
         #command_enum
         #execute_impl
+        #handle_struct
         #clean_impl
         #handle_sender_impl
         #spawn_impl
         #service_queue_impl
         #direct_impl
         #direct_mut_impl
+        #metrics_impl
     })
 }
 
@@ -359,7 +373,9 @@ fn generate_command_infra(
     handle_name: &Ident,
     commands: &[CommandMethod],
     poll_types: Option<&Vec<Type>>,
-) -> (TokenStream, TokenStream, TokenStream, TokenStream) {
+) -> (TokenStream, TokenStream, TokenStream, TokenStream, TokenStream) {
+    let cmd_count = commands.len();
+
     // Generate enum variants
     let enum_variants: Vec<TokenStream> = commands
         .iter()
@@ -374,9 +390,81 @@ fn generate_command_infra(
         })
         .collect();
 
+    // Generate index() match arms
+    let index_arms: Vec<TokenStream> = commands
+        .iter()
+        .enumerate()
+        .map(|(i, cmd)| {
+            let variant = &cmd.variant_name;
+            if cmd.params.is_empty() {
+                quote! { Self::#variant => #i, }
+            } else {
+                quote! { Self::#variant(..) => #i, }
+            }
+        })
+        .collect();
+
+    // Generate name() match arms
+    let name_arms: Vec<TokenStream> = commands
+        .iter()
+        .map(|cmd| {
+            let variant = &cmd.variant_name;
+            let name = cmd.method_name.to_string();
+            if cmd.params.is_empty() {
+                quote! { Self::#variant => #name, }
+            } else {
+                quote! { Self::#variant(..) => #name, }
+            }
+        })
+        .collect();
+
+    // Generate NAMES array
+    let names: Vec<String> = commands.iter().map(|cmd| cmd.method_name.to_string()).collect();
+
+    // For empty enums, use unreachable!() since they can never be instantiated
+    let index_body = if commands.is_empty() {
+        quote! { unreachable!("empty command enum cannot be instantiated") }
+    } else {
+        quote! {
+            match self {
+                #(#index_arms)*
+            }
+        }
+    };
+
+    let name_body = if commands.is_empty() {
+        quote! { unreachable!("empty command enum cannot be instantiated") }
+    } else {
+        quote! {
+            match self {
+                #(#name_arms)*
+            }
+        }
+    };
+
     let command_enum = quote! {
         enum #command_enum_name {
             #(#enum_variants)*
+        }
+
+        impl #command_enum_name {
+            /// Number of command variants.
+            const COUNT: usize = #cmd_count;
+
+            /// Array of command names for metrics.
+            const NAMES: [&'static str; #cmd_count] = [#(#names),*];
+
+            /// Returns the index of this command variant.
+            #[inline]
+            fn index(&self) -> usize {
+                #index_body
+            }
+
+            /// Returns the name of this command variant.
+            #[inline]
+            fn name(&self) -> &'static str {
+                #name_body
+            }
         }
     };
 
@@ -448,15 +536,17 @@ fn generate_command_infra(
         }
     };
 
-    // Generate handle sender methods (same for both poll and regular commands)
+    // Generate handle sender methods with metrics instrumentation
     let sender_methods: Vec<TokenStream> = commands
         .iter()
-        .map(|cmd| {
+        .enumerate()
+        .map(|(idx, cmd)| {
             let method = &cmd.method_name;
             let variant = &cmd.variant_name;
             if cmd.params.is_empty() {
                 quote! {
                     pub fn #method(&self) {
+                        self.metrics.inc_enqueued(#idx);
                         let _ = self.cmd_tx.try_send(#command_enum_name::#variant);
                     }
                 }
@@ -469,6 +559,7 @@ fn generate_command_infra(
                 let param_names: Vec<_> = cmd.params.iter().map(|(name, _)| name).collect();
                 quote! {
                     pub fn #method(&self, #(#param_decls),*) {
+                        self.metrics.inc_enqueued(#idx);
                         let _ = self.cmd_tx.try_send(#command_enum_name::#variant(#(#param_names),*));
                     }
                 }
@@ -479,6 +570,26 @@ fn generate_command_infra(
     let handle_impl = quote! {
         impl #handle_name {
             #(#sender_methods)*
+        }
+    };
+
+    // Generate metrics stats methods
+    let metrics_impl = quote! {
+        impl #handle_name {
+            /// Returns per-command statistics.
+            pub fn command_stats(&self) -> impl Iterator<Item = grove::metrics::CommandStats> + '_ {
+                (0..#cmd_count).map(move |i| grove::metrics::CommandStats {
+                    name: #command_enum_name::NAMES[i],
+                    depth: self.metrics.command_depth(i),
+                    total_enqueued: self.metrics.command_enqueued(i),
+                    total_processed: self.metrics.command_processed(i),
+                })
+            }
+
+            /// Returns aggregate statistics with historical samples.
+            pub fn aggregate_stats(&self) -> grove::metrics::AggregateStats {
+                self.metrics.aggregate_stats()
+            }
         }
     };
 
@@ -536,7 +647,7 @@ fn generate_command_infra(
         }
     };
 
-    (command_enum, execute_impl, handle_impl, service_queue_impl)
+    (command_enum, execute_impl, handle_impl, service_queue_impl, metrics_impl)
 }
 
 fn generate_spawn_impl(
@@ -582,18 +693,40 @@ fn generate_spawn_impl(
     let has_commands = !commands.is_empty();
     let has_events = !event_handlers.is_empty();
 
+    // Command processing with metrics instrumentation
+    let cmd_process_with_metrics = quote! {
+        let cmd_idx = cmd.index();
+        cmd.execute(&mut *state.write().unwrap());
+        metrics.inc_processed(cmd_idx);
+
+        // Sampling: check if we should record a sample
+        {
+            let mut s = state.write().unwrap();
+            s.__grove_sampling_state.inc_command();
+            if s.__grove_sampling_state.should_sample() {
+                metrics.record_sample();
+                s.__grove_sampling_state.reset();
+            }
+        }
+    };
+
+    // Drain commands without metrics (on shutdown)
+    let cmd_drain = quote! {
+        while let Ok(cmd) = cmd_rx.try_recv() {
+            cmd.execute(&mut *state.write().unwrap());
+        }
+    };
+
     let loop_body = if has_commands && has_events {
         quote! {
             tokio::select! {
                 _ = cancel_token.cancelled() => {
                     // Drain remaining commands before exit
-                    while let Ok(cmd) = cmd_rx.try_recv() {
-                        cmd.execute(&mut *state.write().unwrap());
-                    }
+                    #cmd_drain
                     break;
                 }
                 Some(cmd) = cmd_rx.recv() => {
-                    cmd.execute(&mut *state.write().unwrap());
+                    #cmd_process_with_metrics
                 }
                 #(#event_select_arms)*
             }
@@ -603,13 +736,11 @@ fn generate_spawn_impl(
             tokio::select! {
                 _ = cancel_token.cancelled() => {
                     // Drain remaining commands before exit
-                    while let Ok(cmd) = cmd_rx.try_recv() {
-                        cmd.execute(&mut *state.write().unwrap());
-                    }
+                    #cmd_drain
                     break;
                 }
                 Some(cmd) = cmd_rx.recv() => {
-                    cmd.execute(&mut *state.write().unwrap());
+                    #cmd_process_with_metrics
                 }
             }
         }
@@ -629,12 +760,15 @@ fn generate_spawn_impl(
         }
     };
 
+    let cmd_count = commands.len();
+
     if has_context_tasks {
         // Generate builder pattern
         generate_spawn_with_builder(
             struct_name,
             handle_name,
             command_enum_name,
+            cmd_count,
             tasks,
             &event_receiver_setup,
             &loop_body,
@@ -645,6 +779,7 @@ fn generate_spawn_impl(
             struct_name,
             handle_name,
             command_enum_name,
+            cmd_count,
             tasks,
             &event_receiver_setup,
             &loop_body,
@@ -657,6 +792,7 @@ fn generate_spawn_simple(
     struct_name: &Ident,
     handle_name: &Ident,
     command_enum_name: &Ident,
+    cmd_count: usize,
     tasks: &[TaskMethod],
     event_receiver_setup: &[TokenStream],
     loop_body: &TokenStream,
@@ -684,6 +820,11 @@ fn generate_spawn_simple(
             pub fn spawn(mut self) -> #handle_name {
                 let (cmd_tx, mut cmd_rx) = grove::runtime::mpsc::channel::<#command_enum_name>(256);
 
+                // Create metrics for command channel
+                let metrics = grove::runtime::Arc::new(
+                    grove::metrics::CommandMetrics::<#cmd_count>::new()
+                );
+
                 self.__wire_emitter();
 
                 #(#event_receiver_setup)*
@@ -697,6 +838,7 @@ fn generate_spawn_simple(
                 {
                     let join_handles = join_handles.clone();
                     let cancel_token = cancel_token.clone();
+                    let metrics = metrics.clone();
                     let main_loop_handle = tokio::spawn(async move {
                         let state = state_clone;
                         loop {
@@ -709,6 +851,7 @@ fn generate_spawn_simple(
                 let handle = #handle_name {
                     state,
                     cmd_tx,
+                    metrics,
                 };
 
                 #(#task_spawns)*
@@ -724,6 +867,7 @@ fn generate_spawn_with_builder(
     struct_name: &Ident,
     handle_name: &Ident,
     command_enum_name: &Ident,
+    cmd_count: usize,
     tasks: &[TaskMethod],
     event_receiver_setup: &[TokenStream],
     loop_body: &TokenStream,
@@ -857,6 +1001,11 @@ fn generate_spawn_with_builder(
             fn __spawn_core(mut self) -> (#handle_name, grove::runtime::Arc<grove::runtime::Mutex<Vec<grove::runtime::JoinHandle<()>>>>) {
                 let (cmd_tx, mut cmd_rx) = grove::runtime::mpsc::channel::<#command_enum_name>(256);
 
+                // Create metrics for command channel
+                let metrics = grove::runtime::Arc::new(
+                    grove::metrics::CommandMetrics::<#cmd_count>::new()
+                );
+
                 self.__wire_emitter();
 
                 #(#event_receiver_setup)*
@@ -870,6 +1019,7 @@ fn generate_spawn_with_builder(
                 {
                     let join_handles = join_handles.clone();
                     let cancel_token = cancel_token.clone();
+                    let metrics = metrics.clone();
                     let main_loop_handle = tokio::spawn(async move {
                         let state = state_clone;
                         loop {
@@ -883,6 +1033,7 @@ fn generate_spawn_with_builder(
                     #handle_name {
                         state,
                         cmd_tx,
+                        metrics,
                     },
                     join_handles,
                 )

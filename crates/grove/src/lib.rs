@@ -18,6 +18,9 @@ pub use grove_macros::service;
 // Re-export event types
 pub use event::EventReceiver;
 
+// Re-export metrics types
+pub mod metrics;
+
 // Re-export runtime dependencies that generated code needs.
 #[doc(hidden)]
 pub mod runtime {
@@ -168,6 +171,7 @@ pub mod runtime {
 pub mod event {
     use std::any::{Any, TypeId};
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
     use tokio::sync::broadcast;
 
@@ -207,6 +211,14 @@ pub mod event {
         pub fn into_inner(self) -> broadcast::Receiver<T> {
             self.0
         }
+
+        /// Returns the number of events waiting in this receiver's queue.
+        ///
+        /// This is the subscriber-side queue depth - how many events have been
+        /// published but not yet received by this subscriber.
+        pub fn depth(&self) -> usize {
+            self.0.len()
+        }
     }
 
     /// Emitter for sending events to subscribers.
@@ -216,6 +228,8 @@ pub mod event {
     #[derive(Clone)]
     pub struct Emitter {
         senders: Arc<HashMap<TypeId, Box<dyn Any + Send + Sync>>>,
+        /// Published count per event type.
+        counters: Arc<HashMap<TypeId, AtomicU64>>,
     }
 
     impl Emitter {
@@ -223,14 +237,19 @@ pub mod event {
         pub fn new() -> Self {
             Self {
                 senders: Arc::new(HashMap::new()),
+                counters: Arc::new(HashMap::new()),
             }
         }
 
         /// Creates an emitter with pre-registered senders.
         #[doc(hidden)]
-        pub fn with_senders(senders: HashMap<TypeId, Box<dyn Any + Send + Sync>>) -> Self {
+        pub fn with_senders(
+            senders: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
+            counters: HashMap<TypeId, AtomicU64>,
+        ) -> Self {
             Self {
                 senders: Arc::new(senders),
+                counters: Arc::new(counters),
             }
         }
 
@@ -242,6 +261,10 @@ pub mod event {
                 if let Some(tx) = sender.downcast_ref::<broadcast::Sender<E>>() {
                     // Ignore send errors (no receivers is fine)
                     let _ = tx.send(event);
+                    // Increment published counter
+                    if let Some(counter) = self.counters.get(&TypeId::of::<E>()) {
+                        counter.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
             }
         }
@@ -257,6 +280,23 @@ pub mod event {
                 .expect("event type not registered with this emitter")
                 .subscribe()
         }
+
+        /// Returns the number of events published for this event type.
+        pub fn published<E: Event>(&self) -> u64 {
+            self.counters
+                .get(&TypeId::of::<E>())
+                .map(|c| c.load(Ordering::Relaxed))
+                .unwrap_or(0)
+        }
+
+        /// Returns the current number of subscribers for this event type.
+        pub fn subscriber_count<E: Event>(&self) -> usize {
+            self.senders
+                .get(&TypeId::of::<E>())
+                .and_then(|sender| sender.downcast_ref::<broadcast::Sender<E>>())
+                .map(|tx| tx.receiver_count())
+                .unwrap_or(0)
+        }
     }
 
     impl Default for Emitter {
@@ -269,6 +309,7 @@ pub mod event {
     #[doc(hidden)]
     pub struct EmitterBuilder {
         senders: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
+        counters: HashMap<TypeId, AtomicU64>,
     }
 
     impl Default for EmitterBuilder {
@@ -281,6 +322,7 @@ pub mod event {
         pub fn new() -> Self {
             Self {
                 senders: HashMap::new(),
+                counters: HashMap::new(),
             }
         }
 
@@ -288,11 +330,12 @@ pub mod event {
         pub fn add_event<E: Event>(&mut self, capacity: usize) -> broadcast::Sender<E> {
             let (tx, _) = broadcast::channel(capacity);
             self.senders.insert(TypeId::of::<E>(), Box::new(tx.clone()));
+            self.counters.insert(TypeId::of::<E>(), AtomicU64::new(0));
             tx
         }
 
         pub fn build(self) -> Emitter {
-            Emitter::with_senders(self.senders)
+            Emitter::with_senders(self.senders, self.counters)
         }
     }
 }
