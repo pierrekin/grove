@@ -470,6 +470,7 @@ fn generate_constructor(
     quote! {
         impl #struct_name {
             /// Creates a new instance of this service.
+            #[allow(clippy::too_many_arguments)]
             pub fn new(#(#params),*) -> Self {
                 Self {
                     #(#field_inits,)*
