@@ -443,6 +443,7 @@ fn generate_command_infra(
     };
 
     let command_enum = quote! {
+        #[allow(clippy::enum_variant_names, clippy::module_name_repetitions)]
         enum #command_enum_name {
             #(#enum_variants)*
         }
