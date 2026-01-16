@@ -68,7 +68,7 @@ impl Chat {
 // Bootstrap
 // =============================================================================
 
-#[tokio::main]
+#[async_std::main]
 async fn main() {
     // Spawn leaf services first (no dependencies)
     let notifications = NotificationService::new().spawn();
@@ -88,7 +88,7 @@ async fn main() {
     });
 
     // Give the service loops time to process
-    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    async_std::task::sleep(std::time::Duration::from_millis(10)).await;
 
     // Read state via generated getters
     println!("\n📊 Stats:");

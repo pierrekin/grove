@@ -6,8 +6,7 @@ use eframe::egui;
 use status::{Status, StatusHandle};
 
 fn main() -> eframe::Result<()> {
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let _guard = rt.enter();
+    // async-std executor runs automatically, no explicit runtime needed
 
     // Wire up services
     let counter = Counter::new().spawn();

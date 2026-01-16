@@ -74,7 +74,7 @@ impl MessageGenerator {
     ) {
         let messages = ["Ping!", "Background task running", "Still here"];
         for msg in messages {
-            tokio::time::sleep(Duration::from_millis(30)).await;
+            async_std::task::sleep(Duration::from_millis(30)).await;
             // Emit directly from task - no command wrapper needed!
             handle.emit_message_sent(MessageSent {
                 author_id: 0, // System
@@ -121,7 +121,7 @@ impl Analytics {
 // Bootstrap
 // =============================================================================
 
-#[tokio::main]
+#[async_std::main]
 async fn main() {
     // Spawn Chat - emits events from commands
     let chat = Chat::new().spawn();
@@ -144,7 +144,7 @@ async fn main() {
     });
 
     // Give time for the generator task to emit its events
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    async_std::task::sleep(Duration::from_millis(150)).await;
 
     // Check the analytics
     println!("\n📈 Analytics Stats:");

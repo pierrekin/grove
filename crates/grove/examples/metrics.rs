@@ -73,7 +73,7 @@ impl Monitor {
 // Main - Demonstrate Metrics
 // =============================================================================
 
-#[tokio::main]
+#[async_std::main]
 async fn main() {
     println!("=== Grove Metrics Demo ===\n");
 
@@ -96,7 +96,7 @@ async fn main() {
     worker.batch_process(vec![100, 101, 102]);
 
     // Give time for commands to process
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    async_std::task::sleep(Duration::from_millis(50)).await;
 
     // Per-command statistics
     println!("Per-command stats:");
@@ -137,7 +137,7 @@ async fn main() {
     }
 
     // Small delay to let events be published (but not consumed from event_rx)
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    async_std::task::sleep(Duration::from_millis(50)).await;
 
     // Subscriber-side stats (on the EventReceiver)
     println!("External receiver queue depth: {}", event_rx.depth());
@@ -164,7 +164,7 @@ async fn main() {
     println!("Depth right after burst: {}", agg.depth);
 
     // Wait for processing
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    async_std::task::sleep(Duration::from_millis(200)).await;
 
     let agg = worker.aggregate_stats();
     println!("Depth after processing: {}", agg.depth);

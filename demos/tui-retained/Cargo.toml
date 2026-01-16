@@ -7,5 +7,6 @@ edition = "2021"
 grove = { path = "../../crates/grove" }
 ratatui = "0.29"
 crossterm = "0.28"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+async-std = { version = "1", features = ["attributes", "unstable"] }
+futures = "0.3"
 anyhow = "1"

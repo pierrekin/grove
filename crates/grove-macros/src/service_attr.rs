@@ -486,7 +486,7 @@ fn generate_constructor(
             ///
             /// This cancels the service's cancellation token, which stops the main
             /// event loop and signals background tasks to stop. Tasks should check
-            /// for cancellation in their loops using `tokio::select!` with
+            /// for cancellation in their loops using `futures::select!` with
             /// `token.cancelled()`.
             ///
             /// Use the returned `TaskCompletion` to wait for tasks to finish.
@@ -579,7 +579,7 @@ fn generate_shutdown_method(handle_name: &Ident) -> TokenStream {
             ///
             /// This cancels the service's cancellation token, which stops the main
             /// event loop and signals background tasks to stop. Tasks should check
-            /// for cancellation in their loops using `tokio::select!` with
+            /// for cancellation in their loops using `futures::select!` with
             /// `token.cancelled()`.
             ///
             /// Use the returned `TaskCompletion` to wait for tasks to finish.

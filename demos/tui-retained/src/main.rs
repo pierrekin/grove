@@ -10,8 +10,7 @@ use ratatui::prelude::*;
 use std::io::stdout;
 
 fn main() -> anyhow::Result<()> {
-    let rt = tokio::runtime::Runtime::new()?;
-    let _guard = rt.enter();
+    // async-std executor runs automatically, no explicit runtime needed
 
     // Start the counter service
     let counter = CounterService::new().spawn();

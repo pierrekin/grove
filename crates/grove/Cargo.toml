@@ -8,5 +8,7 @@ description = "A macro-based actor framework for Rust"
 grove-macros = { path = "../grove-macros" }
 
 # Runtime dependencies for generated code
-tokio = { version = "1", features = ["sync", "rt-multi-thread", "macros", "time"] }
-tokio-util = "0.7"
+async-std = { version = "1", features = ["attributes", "unstable"] }
+async-channel = "2"
+async-broadcast = "0.7"
+futures = "0.3"
