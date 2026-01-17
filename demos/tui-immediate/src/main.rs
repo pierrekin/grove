@@ -10,7 +10,7 @@ use ratatui::prelude::*;
 use std::io::stdout;
 
 fn main() -> anyhow::Result<()> {
-    // async-std executor runs automatically, no explicit runtime needed
+    // smol's global executor runs automatically with worker threads
 
     // Start the log service with task init context
     // The generate_logs task receives its config via spawn_generate_logs()

@@ -193,7 +193,7 @@ fn inject_cancel_token_field(fields: &mut FieldsNamed) {
 fn inject_join_handles_field(fields: &mut FieldsNamed) {
     let join_handles_field: syn::Field = syn::parse_quote! {
         #[doc(hidden)]
-        pub __grove_join_handles: grove::runtime::Arc<grove::runtime::Mutex<Vec<grove::runtime::JoinHandle<()>>>>
+        pub __grove_join_handles: grove::runtime::Arc<grove::runtime::Mutex<Vec<Box<dyn grove::runtime::TaskHandle>>>>
     };
     fields.named.push(join_handles_field);
 }

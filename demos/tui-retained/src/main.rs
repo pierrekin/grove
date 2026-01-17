@@ -10,7 +10,7 @@ use ratatui::prelude::*;
 use std::io::stdout;
 
 fn main() -> anyhow::Result<()> {
-    // async-std executor runs automatically, no explicit runtime needed
+    // smol's global executor runs automatically with worker threads
 
     // Start the counter service
     let counter = CounterService::new().spawn();

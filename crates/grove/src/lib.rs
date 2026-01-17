@@ -25,48 +25,48 @@ pub mod metrics;
 mod cancellation;
 pub use cancellation::CancellationToken;
 
+// Spawner abstraction for executor-agnostic design
+mod spawner;
+pub use spawner::{SmolSpawner, Spawner, TaskHandle};
+
 // Re-export runtime dependencies that generated code needs.
 #[doc(hidden)]
 pub mod runtime {
     pub use std::sync::{Arc, Mutex, RwLock};
     pub use async_channel as mpsc;
     pub use async_broadcast as broadcast;
-    pub use async_std::task::JoinHandle;
-    pub use async_std::task::spawn;
-    pub use async_std::task::sleep;
     pub use crate::CancellationToken;
+    pub use crate::{Spawner, SmolSpawner, TaskHandle};
     pub use futures;
     pub use futures::FutureExt;
+    pub use async_io::Timer;
 
     use std::fmt;
     use std::time::Duration;
 
     /// Handle for waiting on task completion after shutdown.
     pub struct TaskCompletion {
-        handles: Arc<Mutex<Vec<JoinHandle<()>>>>,
+        handles: Arc<Mutex<Vec<Box<dyn TaskHandle>>>>,
     }
 
     impl TaskCompletion {
         /// Creates a new TaskCompletion from shared JoinHandles.
-        pub fn new(handles: Arc<Mutex<Vec<JoinHandle<()>>>>) -> Self {
+        pub fn new(handles: Arc<Mutex<Vec<Box<dyn TaskHandle>>>>) -> Self {
             Self { handles }
         }
 
         /// Blocks until all tasks complete.
         ///
-        /// Note: With async-std, task panics propagate directly and cannot be caught
+        /// Note: Task panics propagate directly and cannot be caught
         /// in the same way as with tokio. If a task panics, the panic will propagate
         /// to this call.
         pub fn wait(&self) -> Result<(), TaskPanicked> {
-            async_std::task::block_on(async {
-                let handles: Vec<_> = self.handles.lock().unwrap().drain(..).collect();
-                for handle in handles {
-                    // async-std JoinHandle returns T directly; panics propagate
-                    handle.await;
-                }
-            });
+            let handles: Vec<_> = self.handles.lock().unwrap().drain(..).collect();
+            for handle in handles {
+                handle.block_on();
+            }
 
-            // With async-std, if we reach here, no panics occurred
+            // If we reach here, no panics occurred
             Ok(())
         }
 
@@ -75,25 +75,36 @@ pub mod runtime {
         /// Returns `Err(WaitError::Timeout)` if the timeout expires.
         /// Returns `Err(WaitError::Panicked(_))` if any task panicked.
         pub fn wait_timeout(&self, duration: Duration) -> Result<(), WaitError> {
-            async_std::task::block_on(async {
-                let result = async_std::future::timeout(duration, async {
+            use futures_lite::future;
+
+            future::block_on(async {
+                let wait_future = async {
                     let handles: Vec<_> = self.handles.lock().unwrap().drain(..).collect();
                     for handle in handles {
-                        handle.await;
+                        handle.block_on();
                     }
-                })
-                .await;
+                };
 
-                match result {
-                    Ok(()) => Ok(()),
-                    Err(_) => Err(WaitError::Timeout),
-                }
+                let timeout_future = Timer::after(duration);
+
+                // Race between wait and timeout
+                futures_lite::future::or(
+                    async {
+                        wait_future.await;
+                        Ok(())
+                    },
+                    async {
+                        timeout_future.await;
+                        Err(WaitError::Timeout)
+                    },
+                )
+                .await
             })
         }
 
         /// Returns true if all tasks have completed.
         ///
-        /// Note: With async-std, we track completion by checking if handles are empty
+        /// Note: We track completion by checking if handles are empty
         /// after draining. This is a simplification from the tokio implementation.
         pub fn is_complete(&self) -> bool {
             self.handles.lock().unwrap().is_empty()
@@ -194,7 +205,7 @@ pub mod event {
         ///
         /// Returns `None` if the channel is closed.
         pub fn recv(&mut self) -> Option<T> {
-            async_std::task::block_on(async { self.0.recv().await.ok() })
+            futures_lite::future::block_on(async { self.0.recv().await.ok() })
         }
 
         /// Returns the inner broadcast receiver.

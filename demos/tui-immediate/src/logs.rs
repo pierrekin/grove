@@ -78,7 +78,7 @@ impl LogService {
 
         loop {
             let mut cancel_fut = std::pin::pin!(cancel.cancelled().fuse());
-            let mut sleep_fut = std::pin::pin!(async_std::task::sleep(config.interval).fuse());
+            let mut sleep_fut = std::pin::pin!(async_io::Timer::after(config.interval).fuse());
 
             futures::select! {
                 _ = cancel_fut => break,

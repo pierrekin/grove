@@ -43,7 +43,7 @@ impl CounterService {
 
         loop {
             let mut cancel_fut = std::pin::pin!(cancel.cancelled().fuse());
-            let mut sleep_fut = std::pin::pin!(async_std::task::sleep(std::time::Duration::from_millis(500)).fuse());
+            let mut sleep_fut = std::pin::pin!(async_io::Timer::after(std::time::Duration::from_millis(500)).fuse());
 
             futures::select! {
                 _ = cancel_fut => break,

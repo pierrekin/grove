@@ -8,7 +8,9 @@ description = "A macro-based actor framework for Rust"
 grove-macros = { path = "../grove-macros" }
 
 # Runtime dependencies for generated code
-async-std = { version = "1", features = ["attributes", "unstable"] }
+smol = "2"
+futures-lite = "2"
+async-io = "2"
 async-channel = "2"
 async-broadcast = "0.7"
 futures = "0.3"

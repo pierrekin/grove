@@ -6,7 +6,7 @@ use eframe::egui;
 use status::{Status, StatusHandle};
 
 fn main() -> eframe::Result<()> {
-    // async-std executor runs automatically, no explicit runtime needed
+    // smol's global executor runs automatically with worker threads
 
     // Wire up services
     let counter = Counter::new().spawn();
