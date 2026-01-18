@@ -1550,7 +1550,7 @@ dependencies = [
 
 [[package]]
 name = "grove"
-version = "0.0.13"
+version = "0.0.14"
 dependencies = [
  "async-broadcast",
  "async-channel",
@@ -1563,7 +1563,7 @@ dependencies = [
 
 [[package]]
 name = "grove-macros"
-version = "0.0.13"
+version = "0.0.14"
 dependencies = [
  "proc-macro2",
  "quote",
