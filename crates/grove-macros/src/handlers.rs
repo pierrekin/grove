@@ -676,16 +676,32 @@ fn generate_spawn_impl(
         })
         .collect();
 
-    // Generate select! arms for events
+    // Generate select! arms for events (grove::runtime::futures::select! syntax)
     let event_select_arms: Vec<TokenStream> = event_handlers
         .iter()
         .map(|handler| {
             let method = &handler.method_name;
-            let rx_name = format_ident!("{}_rx", method);
+            let fut_name = format_ident!("{}_rx_fut", handler.method_name);
             quote! {
-                Ok(event) = #rx_name.recv() => {
-                    state.write().unwrap().#method(event);
+                result = #fut_name => {
+                    if let Ok(event) = result {
+                        state.write().unwrap().#method(event);
+                    }
+                    // Future will be recreated at next loop iteration
                 }
+            }
+        })
+        .collect();
+
+    // Generate event future setup (inside loop, before select)
+    // Note: futures::select! requires Unpin futures, so we pin them
+    let event_fut_setup: Vec<TokenStream> = event_handlers
+        .iter()
+        .map(|handler| {
+            let rx_name = format_ident!("{}_rx", handler.method_name);
+            let fut_name = format_ident!("{}_rx_fut", handler.method_name);
+            quote! {
+                let mut #fut_name = std::pin::pin!(#rx_name.recv().fuse());
             }
         })
         .collect();
@@ -720,43 +736,76 @@ fn generate_spawn_impl(
 
     let loop_body = if has_commands && has_events {
         quote! {
-            tokio::select! {
-                _ = cancel_token.cancelled() => {
+            use grove::runtime::FutureExt;
+
+            #(#event_fut_setup)*
+
+            let mut cancel_fut = std::pin::pin!(cancel_token.cancelled().fuse());
+            let mut cmd_fut = std::pin::pin!(cmd_rx.recv().fuse());
+
+            grove::runtime::futures::select! {
+                _ = cancel_fut => {
                     // Drain remaining commands before exit
                     #cmd_drain
                     break;
                 }
-                Some(cmd) = cmd_rx.recv() => {
-                    #cmd_process_with_metrics
+                result = cmd_fut => {
+                    match result {
+                        Ok(cmd) => {
+                            #cmd_process_with_metrics
+                        }
+                        Err(_) => break, // Channel closed
+                    }
                 }
                 #(#event_select_arms)*
             }
         }
     } else if has_commands {
         quote! {
-            tokio::select! {
-                _ = cancel_token.cancelled() => {
+            use grove::runtime::FutureExt;
+
+            let mut cancel_fut = std::pin::pin!(cancel_token.cancelled().fuse());
+            let mut cmd_fut = std::pin::pin!(cmd_rx.recv().fuse());
+
+            grove::runtime::futures::select! {
+                _ = cancel_fut => {
                     // Drain remaining commands before exit
                     #cmd_drain
                     break;
                 }
-                Some(cmd) = cmd_rx.recv() => {
-                    #cmd_process_with_metrics
+                result = cmd_fut => {
+                    match result {
+                        Ok(cmd) => {
+                            #cmd_process_with_metrics
+                        }
+                        Err(_) => break, // Channel closed
+                    }
                 }
             }
         }
     } else if has_events {
         quote! {
-            tokio::select! {
-                _ = cancel_token.cancelled() => break,
+            use grove::runtime::FutureExt;
+
+            #(#event_fut_setup)*
+
+            let mut cancel_fut = std::pin::pin!(cancel_token.cancelled().fuse());
+
+            grove::runtime::futures::select! {
+                _ = cancel_fut => break,
                 #(#event_select_arms)*
             }
         }
     } else {
         quote! {
-            tokio::select! {
-                _ = cancel_token.cancelled() => break,
-                _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
+            use grove::runtime::FutureExt;
+
+            let mut cancel_fut = std::pin::pin!(cancel_token.cancelled().fuse());
+            let mut sleep_fut = std::pin::pin!(grove::runtime::Timer::after(std::time::Duration::from_secs(1)).fuse());
+
+            grove::runtime::futures::select! {
+                _ = cancel_fut => break,
+                _ = sleep_fut => {}
             }
         }
     };
@@ -806,10 +855,10 @@ fn generate_spawn_simple(
                 {
                     let handle = handle.clone();
                     let cancel_token = cancel_token.child_token();
-                    let task_handle = tokio::spawn(async move {
+                    let task_handle = spawner.spawn(async move {
                         #struct_name::#method_name(handle, cancel_token).await;
                     });
-                    join_handles.lock().unwrap().push(task_handle);
+                    join_handles.lock().unwrap().push(Box::new(task_handle));
                 }
             }
         })
@@ -818,8 +867,25 @@ fn generate_spawn_simple(
     quote! {
         impl #struct_name {
             /// Spawns this service and returns a handle for interacting with it.
-            pub fn spawn(mut self) -> #handle_name {
-                let (cmd_tx, mut cmd_rx) = grove::runtime::mpsc::channel::<#command_enum_name>(256);
+            ///
+            /// Uses the default [`SmolSpawner`](grove::SmolSpawner) for task spawning.
+            /// For custom executors, use [`spawn_with`](Self::spawn_with).
+            pub fn spawn(self) -> #handle_name {
+                self.spawn_with(grove::runtime::SmolSpawner)
+            }
+
+            /// Spawns this service with a custom spawner.
+            ///
+            /// Use this to integrate with custom executors like GPUI's background executor.
+            ///
+            /// # Example
+            ///
+            /// ```ignore
+            /// let spawner = GpuiSpawner::new(cx.background_executor());
+            /// let service = MyService::new().spawn_with(spawner);
+            /// ```
+            pub fn spawn_with<__S: grove::runtime::Spawner>(mut self, spawner: __S) -> #handle_name {
+                let (cmd_tx, cmd_rx) = grove::runtime::mpsc::bounded::<#command_enum_name>(256);
 
                 // Create metrics for command channel
                 let metrics = grove::runtime::Arc::new(
@@ -840,13 +906,14 @@ fn generate_spawn_simple(
                     let join_handles = join_handles.clone();
                     let cancel_token = cancel_token.clone();
                     let metrics = metrics.clone();
-                    let main_loop_handle = tokio::spawn(async move {
+                    let main_loop_handle = spawner.spawn(async move {
                         let state = state_clone;
+                        let mut cmd_rx = cmd_rx;
                         loop {
                             #loop_body
                         }
                     });
-                    join_handles.lock().unwrap().push(main_loop_handle);
+                    join_handles.lock().unwrap().push(Box::new(main_loop_handle));
                 }
 
                 let handle = #handle_name {
@@ -948,7 +1015,7 @@ fn generate_spawn_with_builder(
         })
         .collect();
 
-    // Generate task spawns in builder's spawn() - handles both context and handle-only tasks
+    // Generate task spawns in builder's spawn_with() - handles both context and handle-only tasks
     let task_spawns: Vec<TokenStream> = tasks
         .iter()
         .map(|task| {
@@ -959,10 +1026,10 @@ fn generate_spawn_with_builder(
                     {
                         let handle = handle.clone();
                         let cancel_token = cancel_token.child_token();
-                        let task_handle = tokio::spawn(async move {
+                        let task_handle = spawner.spawn(async move {
                             #struct_name::#method_name(handle, cancel_token).await;
                         });
-                        join_handles.lock().unwrap().push(task_handle);
+                        join_handles.lock().unwrap().push(Box::new(task_handle));
                     }
                 }
             } else {
@@ -979,10 +1046,10 @@ fn generate_spawn_with_builder(
                     if let Some((#(#param_names,)*)) = self.#field_name {
                         let handle = handle.clone();
                         let cancel_token = cancel_token.child_token();
-                        let task_handle = tokio::spawn(async move {
+                        let task_handle = spawner.spawn(async move {
                             #struct_name::#method_name(handle, cancel_token, #(#param_names),*).await;
                         });
-                        join_handles.lock().unwrap().push(task_handle);
+                        join_handles.lock().unwrap().push(Box::new(task_handle));
                     }
                 }
             }
@@ -999,8 +1066,8 @@ fn generate_spawn_with_builder(
 
         impl #struct_name {
             /// Internal: spawns actor without tasks (used by builder)
-            fn __spawn_core(mut self) -> (#handle_name, grove::runtime::Arc<grove::runtime::Mutex<Vec<grove::runtime::JoinHandle<()>>>>) {
-                let (cmd_tx, mut cmd_rx) = grove::runtime::mpsc::channel::<#command_enum_name>(256);
+            fn __spawn_core_with<__S: grove::runtime::Spawner>(mut self, spawner: &__S) -> (#handle_name, grove::runtime::Arc<grove::runtime::Mutex<Vec<Box<dyn grove::runtime::TaskHandle>>>>) {
+                let (cmd_tx, cmd_rx) = grove::runtime::mpsc::bounded::<#command_enum_name>(256);
 
                 // Create metrics for command channel
                 let metrics = grove::runtime::Arc::new(
@@ -1021,13 +1088,14 @@ fn generate_spawn_with_builder(
                     let join_handles = join_handles.clone();
                     let cancel_token = cancel_token.clone();
                     let metrics = metrics.clone();
-                    let main_loop_handle = tokio::spawn(async move {
+                    let main_loop_handle = spawner.spawn(async move {
                         let state = state_clone;
+                        let mut cmd_rx = cmd_rx;
                         loop {
                             #loop_body
                         }
                     });
-                    join_handles.lock().unwrap().push(main_loop_handle);
+                    join_handles.lock().unwrap().push(Box::new(main_loop_handle));
                 }
 
                 (
@@ -1047,9 +1115,19 @@ fn generate_spawn_with_builder(
             #(#builder_spawn_methods)*
 
             /// Spawns this service and returns a handle for interacting with it.
+            ///
+            /// Uses the default [`SmolSpawner`](grove::SmolSpawner) for task spawning.
+            /// For custom executors, use [`spawn_with`](Self::spawn_with).
             pub fn spawn(self) -> #handle_name {
+                self.spawn_with(grove::runtime::SmolSpawner)
+            }
+
+            /// Spawns this service with a custom spawner.
+            ///
+            /// Use this to integrate with custom executors like GPUI's background executor.
+            pub fn spawn_with<__S: grove::runtime::Spawner>(self, spawner: __S) -> #handle_name {
                 let cancel_token = self.inner.__grove_cancel_token.clone();
-                let (handle, join_handles) = self.inner.__spawn_core();
+                let (handle, join_handles) = self.inner.__spawn_core_with(&spawner);
 
                 #(#task_spawns)*
 

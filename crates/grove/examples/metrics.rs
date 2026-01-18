@@ -73,106 +73,107 @@ impl Monitor {
 // Main - Demonstrate Metrics
 // =============================================================================
 
-#[tokio::main]
-async fn main() {
-    println!("=== Grove Metrics Demo ===\n");
+fn main() {
+    smol::block_on(async {
+        println!("=== Grove Metrics Demo ===\n");
 
-    // Spawn services
-    let worker = Worker::new().spawn();
-    let monitor = Monitor::new(worker.clone()).spawn();
+        // Spawn services
+        let worker = Worker::new().spawn();
+        let monitor = Monitor::new(worker.clone()).spawn();
 
-    // Also get an external event receiver
-    let mut event_rx = worker.on_work_completed();
+        // Also get an external event receiver
+        let mut event_rx = worker.on_work_completed();
 
-    // ---------------------------------------------------------------------
-    // 1. Command Channel Metrics
-    // ---------------------------------------------------------------------
-    println!("--- Command Channel Metrics ---\n");
+        // ---------------------------------------------------------------------
+        // 1. Command Channel Metrics
+        // ---------------------------------------------------------------------
+        println!("--- Command Channel Metrics ---\n");
 
-    // Send some commands
-    for i in 0..5 {
-        worker.process_item(i);
-    }
-    worker.batch_process(vec![100, 101, 102]);
+        // Send some commands
+        for i in 0..5 {
+            worker.process_item(i);
+        }
+        worker.batch_process(vec![100, 101, 102]);
 
-    // Give time for commands to process
-    tokio::time::sleep(Duration::from_millis(50)).await;
+        // Give time for commands to process
+        async_io::Timer::after(Duration::from_millis(50)).await;
 
-    // Per-command statistics
-    println!("Per-command stats:");
-    for stat in worker.command_stats() {
-        println!(
-            "  {}: depth={}, enqueued={}, processed={}",
-            stat.name, stat.depth, stat.total_enqueued, stat.total_processed
-        );
-    }
+        // Per-command statistics
+        println!("Per-command stats:");
+        for stat in worker.command_stats() {
+            println!(
+                "  {}: depth={}, enqueued={}, processed={}",
+                stat.name, stat.depth, stat.total_enqueued, stat.total_processed
+            );
+        }
 
-    // Aggregate statistics (includes historical sampling)
-    let agg = worker.aggregate_stats();
-    println!("\nAggregate stats:");
-    println!("  Current depth: {}", agg.depth);
-    println!("  Total enqueued: {}", agg.total_enqueued);
-    println!("  Total processed: {}", agg.total_processed);
-    println!("  Mean depth (1s): {:.2}", agg.mean_depth_1s);
-    println!("  Max depth (1m): {}", agg.max_depth_1m);
+        // Aggregate statistics (includes historical sampling)
+        let agg = worker.aggregate_stats();
+        println!("\nAggregate stats:");
+        println!("  Current depth: {}", agg.depth);
+        println!("  Total enqueued: {}", agg.total_enqueued);
+        println!("  Total processed: {}", agg.total_processed);
+        println!("  Mean depth (1s): {:.2}", agg.mean_depth_1s);
+        println!("  Max depth (1m): {}", agg.max_depth_1m);
 
-    // ---------------------------------------------------------------------
-    // 2. Event Publisher Metrics
-    // ---------------------------------------------------------------------
-    println!("\n--- Event Publisher Metrics ---\n");
+        // ---------------------------------------------------------------------
+        // 2. Event Publisher Metrics
+        // ---------------------------------------------------------------------
+        println!("\n--- Event Publisher Metrics ---\n");
 
-    // Publisher-side stats (on the worker handle)
-    println!("WorkCompleted event stats:");
-    println!("  Published: {}", worker.work_completed_published());
-    println!("  Subscriber count: {}", worker.work_completed_subscriber_count());
+        // Publisher-side stats (on the worker handle)
+        println!("WorkCompleted event stats:");
+        println!("  Published: {}", worker.work_completed_published());
+        println!("  Subscriber count: {}", worker.work_completed_subscriber_count());
 
-    // ---------------------------------------------------------------------
-    // 3. Event Subscriber Metrics
-    // ---------------------------------------------------------------------
-    println!("\n--- Event Subscriber Metrics ---\n");
+        // ---------------------------------------------------------------------
+        // 3. Event Subscriber Metrics
+        // ---------------------------------------------------------------------
+        println!("\n--- Event Subscriber Metrics ---\n");
 
-    // Send more events to build up the queue
-    for i in 200..210 {
-        worker.process_item(i);
-    }
+        // Send more events to build up the queue
+        for i in 200..210 {
+            worker.process_item(i);
+        }
 
-    // Small delay to let events be published (but not consumed from event_rx)
-    tokio::time::sleep(Duration::from_millis(50)).await;
+        // Small delay to let events be published (but not consumed from event_rx)
+        async_io::Timer::after(Duration::from_millis(50)).await;
 
-    // Subscriber-side stats (on the EventReceiver)
-    println!("External receiver queue depth: {}", event_rx.depth());
+        // Subscriber-side stats (on the EventReceiver)
+        println!("External receiver queue depth: {}", event_rx.depth());
 
-    // Drain the receiver
-    while event_rx.try_recv().is_some() {}
-    println!("After draining: {}", event_rx.depth());
+        // Drain the receiver
+        while event_rx.try_recv().is_some() {}
+        println!("After draining: {}", event_rx.depth());
 
-    // ---------------------------------------------------------------------
-    // 4. Load test to see metrics under pressure
-    // ---------------------------------------------------------------------
-    println!("\n--- Load Test ---\n");
+        // ---------------------------------------------------------------------
+        // 4. Load test to see metrics under pressure
+        // ---------------------------------------------------------------------
+        println!("\n--- Load Test ---\n");
 
-    // Burst of commands
-    let burst_size = 1000;
-    println!("Sending {} commands in burst...", burst_size);
+        // Burst of commands
+        let burst_size = 1000;
+        println!("Sending {} commands in burst...", burst_size);
 
-    for i in 0..burst_size {
-        worker.process_item(i);
-    }
+        for i in 0..burst_size {
+            worker.process_item(i);
+        }
 
-    // Check depth immediately (before processing completes)
-    let agg = worker.aggregate_stats();
-    println!("Depth right after burst: {}", agg.depth);
+        // Check depth immediately (before processing completes)
+        let agg = worker.aggregate_stats();
+        println!("Depth right after burst: {}", agg.depth);
 
-    // Wait for processing
-    tokio::time::sleep(Duration::from_millis(200)).await;
+        // Wait for processing
+        async_io::Timer::after(Duration::from_millis(200)).await;
 
-    let agg = worker.aggregate_stats();
-    println!("Depth after processing: {}", agg.depth);
-    println!("Total processed: {}", agg.total_processed);
+        let agg = worker.aggregate_stats();
+        println!("Depth after processing: {}", agg.depth);
+        println!("Total processed: {}", agg.total_processed);
 
-    // Final stats
-    println!("\n--- Final Stats ---\n");
-    println!("Worker processed count: {}", worker.processed_count());
-    println!("Monitor events received: {}", monitor.events_received());
-    println!("Total events published: {}", worker.work_completed_published());
+        // Final stats
+        println!("\n--- Final Stats ---\n");
+        println!("Worker processed count: {}", worker.processed_count());
+        println!("Monitor events received: {}", monitor.events_received());
+        println!("Total events published: {}", worker.work_completed_published());
+    })
 }

@@ -10,8 +10,7 @@ use ratatui::prelude::*;
 use std::io::stdout;
 
 fn main() -> anyhow::Result<()> {
-    let rt = tokio::runtime::Runtime::new()?;
-    let _guard = rt.enter();
+    // smol's global executor runs automatically with worker threads
 
     // Start the log service with task init context
     // The generate_logs task receives its config via spawn_generate_logs()

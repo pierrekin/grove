@@ -39,12 +39,15 @@ impl CounterService {
         handle: CounterServiceHandle,
         cancel: grove::runtime::CancellationToken,
     ) {
-        let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
+        use futures::FutureExt;
 
         loop {
-            tokio::select! {
-                _ = cancel.cancelled() => break,
-                _ = interval.tick() => handle.increment(),
+            let mut cancel_fut = std::pin::pin!(cancel.cancelled().fuse());
+            let mut sleep_fut = std::pin::pin!(async_io::Timer::after(std::time::Duration::from_millis(500)).fuse());
+
+            futures::select! {
+                _ = cancel_fut => break,
+                _ = sleep_fut => handle.increment(),
             }
         }
     }

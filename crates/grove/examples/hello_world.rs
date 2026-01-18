@@ -68,30 +68,31 @@ impl Chat {
 // Bootstrap
 // =============================================================================
 
-#[tokio::main]
-async fn main() {
-    // Spawn leaf services first (no dependencies)
-    let notifications = NotificationService::new().spawn();
+fn main() {
+    smol::block_on(async {
+        // Spawn leaf services first (no dependencies)
+        let notifications = NotificationService::new().spawn();
 
-    // Spawn dependent services, injecting handles
-    let chat = Chat::new(notifications.clone()).spawn();
+        // Spawn dependent services, injecting handles
+        let chat = Chat::new(notifications.clone()).spawn();
 
-    // Use the generated sender methods
-    chat.send(Message {
-        author_id: 1,
-        content: "Hello from Grove!".into(),
-    });
+        // Use the generated sender methods
+        chat.send(Message {
+            author_id: 1,
+            content: "Hello from Grove!".into(),
+        });
 
-    chat.send(Message {
-        author_id: 2,
-        content: "This is an actor framework.".into(),
-    });
+        chat.send(Message {
+            author_id: 2,
+            content: "This is an actor framework.".into(),
+        });
 
-    // Give the service loops time to process
-    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        // Give the service loops time to process
+        async_io::Timer::after(std::time::Duration::from_millis(10)).await;
 
-    // Read state via generated getters
-    println!("\n📊 Stats:");
-    println!("   Messages: {}", chat.messages().len());
-    println!("   Notifications sent: {}", notifications.sent_count());
+        // Read state via generated getters
+        println!("\n📊 Stats:");
+        println!("   Messages: {}", chat.messages().len());
+        println!("   Notifications sent: {}", notifications.sent_count());
+    })
 }

@@ -72,13 +72,17 @@ impl LogService {
         cancel: grove::runtime::CancellationToken,
         config: LogGeneratorConfig,
     ) {
-        let mut interval = tokio::time::interval(config.interval);
+        use futures::FutureExt;
+
         let mut idx = 0;
 
         loop {
-            tokio::select! {
-                _ = cancel.cancelled() => break,
-                _ = interval.tick() => {
+            let mut cancel_fut = std::pin::pin!(cancel.cancelled().fuse());
+            let mut sleep_fut = std::pin::pin!(async_io::Timer::after(config.interval).fuse());
+
+            futures::select! {
+                _ = cancel_fut => break,
+                _ = sleep_fut => {
                     let (level, msg) = config.messages[idx % config.messages.len()];
                     handle.add_entry(level, msg.to_string());
                     idx += 1;

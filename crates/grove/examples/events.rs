@@ -74,7 +74,7 @@ impl MessageGenerator {
     ) {
         let messages = ["Ping!", "Background task running", "Still here"];
         for msg in messages {
-            tokio::time::sleep(Duration::from_millis(30)).await;
+            async_io::Timer::after(Duration::from_millis(30)).await;
             // Emit directly from task - no command wrapper needed!
             handle.emit_message_sent(MessageSent {
                 author_id: 0, // System
@@ -121,33 +121,34 @@ impl Analytics {
 // Bootstrap
 // =============================================================================
 
-#[tokio::main]
-async fn main() {
-    // Spawn Chat - emits events from commands
-    let chat = Chat::new().spawn();
+fn main() {
+    smol::block_on(async {
+        // Spawn Chat - emits events from commands
+        let chat = Chat::new().spawn();
 
-    // Spawn MessageGenerator - emits events directly from a task
-    let generator = MessageGenerator::new().spawn();
+        // Spawn MessageGenerator - emits events directly from a task
+        let generator = MessageGenerator::new().spawn();
 
-    // Spawn Analytics, subscribing to events from both services
-    let analytics = Analytics::new(chat.clone(), generator.clone()).spawn();
+        // Spawn Analytics, subscribing to events from both services
+        let analytics = Analytics::new(chat.clone(), generator.clone()).spawn();
 
-    // Send some messages via command
-    chat.send(Message {
-        author_id: 1,
-        content: "Hello from Grove!".into(),
-    });
+        // Send some messages via command
+        chat.send(Message {
+            author_id: 1,
+            content: "Hello from Grove!".into(),
+        });
 
-    chat.send(Message {
-        author_id: 2,
-        content: "Events are working!".into(),
-    });
+        chat.send(Message {
+            author_id: 2,
+            content: "Events are working!".into(),
+        });
 
-    // Give time for the generator task to emit its events
-    tokio::time::sleep(Duration::from_millis(150)).await;
+        // Give time for the generator task to emit its events
+        async_io::Timer::after(Duration::from_millis(150)).await;
 
-    // Check the analytics
-    println!("\n📈 Analytics Stats:");
-    println!("   Messages tracked: {}", analytics.message_count());
-    println!("   Chat messages: {}", chat.messages().len());
+        // Check the analytics
+        println!("\n📈 Analytics Stats:");
+        println!("   Messages tracked: {}", analytics.message_count());
+        println!("   Chat messages: {}", chat.messages().len());
+    })
 }

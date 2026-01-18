@@ -10,8 +10,7 @@ use ratatui::prelude::*;
 use std::io::stdout;
 
 fn main() -> anyhow::Result<()> {
-    let rt = tokio::runtime::Runtime::new()?;
-    let _guard = rt.enter();
+    // smol's global executor runs automatically with worker threads
 
     // Start the counter service
     let counter = CounterService::new().spawn();

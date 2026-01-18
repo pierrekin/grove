@@ -6,8 +6,7 @@ use eframe::egui;
 use status::{Status, StatusHandle};
 
 fn main() -> eframe::Result<()> {
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let _guard = rt.enter();
+    // smol's global executor runs automatically with worker threads
 
     // Wire up services
     let counter = Counter::new().spawn();
